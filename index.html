@@ -22,20 +22,14 @@
 <script type="module">
 import { initializeApp }            from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
 import { getAuth, onAuthStateChanged, signInWithEmailAndPassword,
-         createUserWithEmailAndPassword, signInWithPopup, GoogleAuthProvider,
+         createUserWithEmailAndPassword, signInWithPopup, signInWithRedirect,
+         getRedirectResult, GoogleAuthProvider,
          signOut, updateProfile }   from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js';
 import { getFirestore, doc, getDoc, setDoc, deleteDoc, onSnapshot, collection,
          addDoc, updateDoc, serverTimestamp, query, orderBy }
                                     from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js';
 
-const firebaseConfig = {
-  apiKey: "AIzaSyBp-O2wp8eA_QOWJnxtkpko4CP7AH-3zF4",
-  authDomain: "tournoi-rsth-intergroupes.firebaseapp.com",
-  projectId: "tournoi-rsth-intergroupes",
-  storageBucket: "tournoi-rsth-intergroupes.firebasestorage.app",
-  messagingSenderId: "661309250088",
-  appId: "1:661309250088:web:9519d7ec1de0a8fb9af31d"
-};
+const firebaseConfig = {  apiKey: "AIzaSyBp-O2wp8eA_QOWJnxtkpko4CP7AH-3zF4",  authDomain: "tournoi-rsth-intergroupes.firebaseapp.com",  projectId: "tournoi-rsth-intergroupes",  storageBucket: "tournoi-rsth-intergroupes.firebasestorage.app",  messagingSenderId: "661309250088",  appId: "1:661309250088:web:9519d7ec1de0a8fb9af31d"};
 const app       = initializeApp(firebaseConfig);
 const auth      = getAuth(app);
 const db        = getFirestore(app);
@@ -103,6 +97,17 @@ async function ensureUserDoc(user){
   }
 }
 
+// Handle redirect result (Google sign-in redirect flow)
+getRedirectResult(auth).then(result => {
+  if(result && result.user) {
+    // onAuthStateChanged will fire automatically with the user
+  }
+}).catch(e => {
+  if(e && e.code && e.code !== 'auth/no-current-user') {
+    showAuthMsg(authErrMsg(e.code), 'red');
+  }
+});
+
 onAuthStateChanged(auth, async (user)=>{
   if(USER_ROLE === 'spectator' && !user) return;
   if(user){
@@ -113,7 +118,10 @@ onAuthStateChanged(auth, async (user)=>{
       try {
         const snap = await getDoc(doc(db,'interclub','current'));
         ST.liveOpen = snap.exists() ? snap.data().liveOpen === true : false;
-      } catch(e){ ST.liveOpen = false; }
+      } catch(e){
+        ST.liveOpen = false;
+        // Offline or network error — silently ignore, user will see login screen
+      }
       if(!ST.liveOpen){
         await signOut(auth);
         CURRENT_USER = null; USER_ROLE = null;
@@ -131,7 +139,7 @@ onAuthStateChanged(auth, async (user)=>{
     try {
       const snap = await getDoc(doc(db,'interclub','current'));
       if(snap.exists()) ST.liveOpen = snap.data().liveOpen === true;
-    } catch(e){}
+    } catch(e){ /* réseau indisponible — ignoré */ }
     showLogin();
   }
 });
@@ -150,8 +158,18 @@ window.loginEmail = async function(){
   catch(e){ showAuthMsg(authErrMsg(e.code),'red'); }
 };
 window.loginGoogle = async function(){
-  try { await signInWithPopup(auth, gProvider); }
-  catch(e){ showAuthMsg(authErrMsg(e.code),'red'); }
+  try {
+    // Try popup first; if blocked by COOP (file:// or strict COOP headers), fall back to redirect
+    await signInWithPopup(auth, gProvider);
+  } catch(e){
+    if(e.code === 'auth/popup-blocked' || e.code === 'auth/cancelled-popup-request' ||
+       e.message && e.message.includes('Cross-Origin')) {
+      try { await signInWithRedirect(auth, gProvider); }
+      catch(e2){ showAuthMsg(authErrMsg(e2.code),'red'); }
+    } else {
+      showAuthMsg(authErrMsg(e.code),'red');
+    }
+  }
 };
 window.logout = async function(){
   clearInterval(ST.timerIv); unsubAll();
