@@ -78,22 +78,39 @@ function isLiveBlocked(){ return USER_ROLE === 'spectator' && !ST.liveOpen; }
 // AUTH
 // ══════════════════════════════════════════════════════════
 async function getUserRole(uid){
+  await waitForFirestore();
   try {
     const snap = await getDoc(doc(db,'users',uid));
     if(snap.exists()) return snap.data().role || 'spectator';
-  } catch(e){}
+  } catch(e){ console.warn('getUserRole:', e.message); }
   return 'spectator';
 }
+async function waitForFirestore(maxMs=8000){
+  // Firestore peut être "offline" juste après un redirect — on attend qu'il réponde
+  const ref = doc(db,'_ping','_ping');
+  const start = Date.now();
+  while(Date.now()-start < maxMs){
+    try { await getDoc(ref); return true; } catch(e){
+      if(!e.message||!e.message.includes('offline')) return true; // autre erreur → on continue
+      await new Promise(r=>setTimeout(r,600));
+    }
+  }
+  return false;
+}
 async function ensureUserDoc(user){
+  await waitForFirestore();
   const ref  = doc(db,'users',user.uid);
-  const snap = await getDoc(ref);
+  let snap;
+  try { snap = await getDoc(ref); } catch(e){ return; } // offline → on laisse tomber
   if(!snap.exists()){
-    await setDoc(ref,{
-      email: user.email,
-      name:  user.displayName || user.email.split('@')[0],
-      role:  'spectator',
-      createdAt: serverTimestamp()
-    });
+    try {
+      await setDoc(ref,{
+        email: user.email,
+        name:  user.displayName || user.email.split('@')[0],
+        role:  'spectator',
+        createdAt: serverTimestamp()
+      });
+    } catch(e){ console.warn('ensureUserDoc setDoc:', e.message); }
   }
 }
 
