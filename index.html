@@ -2266,12 +2266,16 @@ input[type=checkbox]{ width:auto;margin-right:6px; }
 document.addEventListener('DOMContentLoaded',()=>{
   if(typeof onCfgChange==='function') onCfgChange();
 });
-window.addEventListener('resize',()=>{ if(window.innerWidth>767) closeMobileMenu(); });
-const _origApplyRoleUIMobile = window.applyRoleUI;
-window.applyRoleUI = function(){
-  _origApplyRoleUIMobile && _origApplyRoleUIMobile();
-  if(typeof syncDrawerButtons==='function') syncDrawerButtons();
-};
+window.addEventListener('resize',()=>{
+  if(window.innerWidth>767 && typeof closeMobileMenu==='function') closeMobileMenu();
+});
+window.applyRoleUI = (function(){
+  const _orig = window.applyRoleUI;
+  return function(){
+    if(typeof _orig==='function') _orig();
+    if(typeof syncDrawerButtons==='function') syncDrawerButtons();
+  };
+})();
 </script>
 
 </body>
