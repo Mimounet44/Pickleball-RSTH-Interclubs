@@ -12,7 +12,7 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="theme-color" content="#0d1a2e">
+<meta name="theme-color" content="#f0f4f8">
 <title>🏓 Pickleball Interclub</title>
 <link href="https://fonts.googleapis.com/css2?family=Exo+2:wght@300;400;600;700;900&family=Oswald:wght@400;500;600;700&display=swap" rel="stylesheet">
 
@@ -326,7 +326,7 @@ window.goTo = function(n){
   updateSpectatorNav(n);
   window.scrollTo(0,0);
   if(n===2) renderTeams();
-  if(n===3){ if(buildSchedule()) renderGen(); else renderGen(); }
+  if(n===3){ buildSchedule(); renderGen(); }
   if(n===4) renderTournament();
   if(n===5) renderFinal();
 };
@@ -395,13 +395,21 @@ window.toggleRules = function(){
 // ══════════════════════════════════════════════════════════
 function getCfg(){
   const halls = +document.getElementById('cfg_halls').value;
-  const morning = +document.getElementById('cfg_morning').value;
+  const totalMatchesEl = document.getElementById('cfg_total_matches');
+  const totalMatches = totalMatchesEl ? +totalMatchesEl.value : 7;
+  const morningEl = document.getElementById('cfg_morning');
+  let morning = morningEl ? +morningEl.value : 3;
+  // Clamp morning so afternoon >= 1
+  if(morning >= totalMatches) morning = totalMatches - 1;
+  if(morning < 1) morning = 1;
+  const afternoon = totalMatches - morning;
   return {
     n:     +document.getElementById('cfg_n').value,
     t:     +document.getElementById('cfg_t').value,
     halls: halls,
+    totalMatches: totalMatches,
     matchesMorning:   morning,
-    matchesAfternoon: (morning===3)?4:3,
+    matchesAfternoon: afternoon,
     mt:    +document.getElementById('cfg_mt').value,
     tt:    +document.getElementById('cfg_tt').value,
     lunchBreak: document.getElementById('cfg_lunch').checked,
@@ -416,6 +424,8 @@ function syncCfgForm(){
   const setV=(id,v)=>{ const el=document.getElementById(id); if(el) el.value=v; };
   const setC=(id,v)=>{ const el=document.getElementById(id); if(el) el.checked=v; };
   setV('cfg_n',c.n); setV('cfg_t',c.t); setV('cfg_halls',c.halls||1);
+  const totalM = c.totalMatches || (c.matchesMorning||3)+(c.matchesAfternoon||4);
+  setV('cfg_total_matches', totalM);
   setV('cfg_morning',c.matchesMorning||3);
   setV('cfg_mt',c.mt); setV('cfg_tt',c.tt);
   setV('cfg_lunchdur',c.lunchDuration||60);
@@ -432,25 +442,34 @@ window.saveCfgAndNext = async function(){
 };
 window.onCfgChange = function(){
   const c=getCfg();
+  // Clamp morning selector options based on total
+  const morningEl = document.getElementById('cfg_morning');
+  if(morningEl){
+    const totalM = c.totalMatches || 7;
+    Array.from(morningEl.options).forEach(opt=>{
+      opt.disabled = +opt.value >= totalM || +opt.value < 1;
+    });
+    if(+morningEl.value >= totalM) morningEl.value = totalM - 1;
+  }
   // Affichage dynamique matchs après-midi
   const afternoonEl = document.getElementById('cfg_afternoon_display');
-  if(afternoonEl) afternoonEl.textContent = (c.matchesMorning===3)?4:3;
+  if(afternoonEl) afternoonEl.textContent = c.matchesAfternoon;
   // Coupure déjeuner
   const lunchRow = document.getElementById('lunchRow');
   if(lunchRow) lunchRow.style.display = c.lunchBreak ? '' : 'none';
   // Résumé
-  const totalMatches = c.matchesMorning + ((c.matchesMorning===3)?4:3);
+  const totalMatches = c.totalMatches || 7;
   const teamsPerHall = Math.floor(c.n / c.halls);
   const courts = c.halls===2 ? (c.t*2) : c.t;
   const morningEnd = addMinutes(c.start, c.matchesMorning * (c.mt + c.tt) - c.tt);
   let afternoonStartTime = c.lunchBreak ? addMinutes(c.lunchStart, c.lunchDuration||60) : morningEnd;
-  const afternoonEnd = addMinutes(afternoonStartTime, ((c.matchesMorning===3)?4:3) * (c.mt + c.tt) - c.tt);
+  const afternoonEnd = addMinutes(afternoonStartTime, c.matchesAfternoon * (c.mt + c.tt) - c.tt);
   const el = document.getElementById('cfgPreview');
   if(el){
     el.className='info info-g';
     el.innerHTML=`<strong>${c.n} équipes</strong> · <strong>${c.halls} salle${c.halls>1?'s':''}</strong> · <strong>${courts} terrains au total</strong><br>
     Matin : <strong>${c.matchesMorning} matchs</strong> (${c.start} → ${morningEnd})${c.lunchBreak?` · Déjeuner ${c.lunchStart} (${c.lunchDuration||60} min)`:''}<br>
-    Après-midi : <strong>${(c.matchesMorning===3)?4:3} matchs</strong> (${afternoonStartTime} → ${afternoonEnd})<br>
+    Après-midi : <strong>${c.matchesAfternoon} matchs</strong> (${afternoonStartTime} → ${afternoonEnd})<br>
     Total : <strong>${totalMatches} matchs/équipe</strong> · ~${teamsPerHall} équipes/salle`;
   }
 };
@@ -588,9 +607,11 @@ function tClub(id){ const t=tObj(id); return t?t.club:''; }
 function buildSchedule(){
   const cfg=getCfg();
   if(ST.teams.length < 4){ alert('Il faut au moins 4 équipes.'); return false; }
+  // Validate morning <= totalMatches-1
+  const totalRounds = cfg.totalMatches || (cfg.matchesMorning + cfg.matchesAfternoon) || 7;
+  if(cfg.matchesMorning >= totalRounds){ cfg.matchesMorning = Math.max(1, totalRounds-1); cfg.matchesAfternoon = totalRounds - cfg.matchesMorning; }
+  cfg.totalMatches = totalRounds;
   ST.cfg = cfg;
-
-  const totalRounds = cfg.matchesMorning + ((cfg.matchesMorning===3)?4:3);
   const N = Math.min(ST.teams.length, cfg.n);
 
   // ── Répartition des équipes dans les salles ──────────────
@@ -767,8 +788,8 @@ function renderGen(){
     const totalByes=Object.values(byeCount).reduce((s,v)=>s+v,0);
     gib.className='info info-g';
     gib.innerHTML=`✅ <strong>${ST.teams.slice(0,cfg.n).length} équipes</strong> · <strong>${cfg.halls} salle${cfg.halls>1?'s':''}</strong> · <strong>${cfg.t*(cfg.halls)} terrains</strong><br>
-    Matin : <strong>${cfg.matchesMorning} matchs</strong> · Après-midi : <strong>${(cfg.matchesMorning===3)?4:3} matchs</strong><br>
-    Matchs/équipe : <strong>${minPlay}–${maxPlay}</strong>${totalByes>0?` · ${totalByes} exemption(s)`:' · Toutes jouent'}<br>
+    Matin : <strong>${cfg.matchesMorning} matchs</strong> · Après-midi : <strong>${cfg.matchesAfternoon} matchs</strong> · Total : <strong>${cfg.totalMatches||7} matchs/équipe</strong><br>
+    Matchs/équipe joués : <strong>${minPlay}–${maxPlay}</strong>${totalByes>0?` · ${totalByes} exemption(s)`:' · Toutes jouent'}<br>
     Total matchs : <strong>${totalMatchCount}</strong> · ${cfg.start} → ${endTime}`;
   }
 
@@ -1107,10 +1128,10 @@ function updateLiveToggleBtn(){
   const btn=document.getElementById('liveToggleBtn'); if(!btn) return;
   if(ST.liveOpen){
     btn.textContent='🟢 Live ouvert';
-    btn.style.cssText='background:linear-gradient(135deg,#0d3320,#1a5c35);border:1px solid #2a9d5c;color:#5ddc8e;'+btn.style.cssText.replace(/background[^;]+;|border[^;]+;|color[^;]+;/g,'');
+    btn.style.cssText='background:linear-gradient(135deg,#e8f5ee,#d0edda);border:1px solid #2a9d5c;color:#145e2c;padding:8px 20px;border-radius:8px;font-family:Oswald,sans-serif;font-size:13px;font-weight:700;letter-spacing:.6px;cursor:pointer;text-transform:uppercase;border:1px solid';
   } else {
     btn.textContent='🔴 Live fermé';
-    btn.style.cssText='background:linear-gradient(135deg,#330d0d,#5c1a1a);border:1px solid #9d2a2a;color:#dc5d5d;'+btn.style.cssText.replace(/background[^;]+;|border[^;]+;|color[^;]+;/g,'');
+    btn.style.cssText='background:linear-gradient(135deg,#fbe8e8,#f5d0d0);border:1px solid #c0281a;color:#8a1a10;padding:8px 20px;border-radius:8px;font-family:Oswald,sans-serif;font-size:13px;font-weight:700;letter-spacing:.6px;cursor:pointer;text-transform:uppercase;border:1px solid';
   }
 }
 
@@ -1165,9 +1186,9 @@ window.loadUserList = async function(){
       const u=d.data(); const uid=d.id;
       const roleIcon={admin:'👑',scorer:'✏️',spectator:'👁'}[u.role]||'?';
       const tr=document.createElement('tr');
-      tr.style.cssText='border-bottom:1px solid rgba(255,255,255,.08);font-size:13px';
-      tr.innerHTML=`<td style="padding:8px 6px;color:#fff;font-weight:600">${u.name||'—'}</td>
-        <td style="padding:8px 6px;color:rgba(255,255,255,.55);font-size:12px">${u.email||'—'}</td>
+      tr.style.cssText='border-bottom:1px solid var(--bdr);font-size:13px';
+      tr.innerHTML=`<td style="padding:8px 6px;color:var(--ink);font-weight:600">${u.name||'—'}</td>
+        <td style="padding:8px 6px;color:var(--muted);font-size:12px">${u.email||'—'}</td>
         <td style="padding:8px 6px">${roleIcon} ${u.role||'—'}</td>
         <td style="padding:8px 6px;text-align:center">
           <button onclick="deleteUserFromList('${uid}')" style="background:none;border:1px solid var(--red);color:var(--red);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px">Suppr.</button>
@@ -1239,7 +1260,7 @@ window.printPlanning = function(){
     const session=rd.session==='morning'?'☀️ MATIN':'🌤️ APRÈS-MIDI';
     const halls=[rd.hall1,rd.hall2].filter(Boolean);
     body+=`<div style="margin-bottom:14px;page-break-inside:avoid">
-      <div style="background:#0d1a2e;color:#fff;padding:7px 12px;font-size:13px;font-weight:700">${session} — Tour ${ri+1} · ${rd.roundTime}${rd.subs.length?' · Exempt: '+rd.subs.map(id=>tName(id)).join(', '):''}</div>
+      <div style="background:#1565c0;color:#fff;padding:7px 12px;font-size:13px;font-weight:700">${session} — Tour ${ri+1} · ${rd.roundTime}${rd.subs.length?' · Exempt: '+rd.subs.map(id=>tName(id)).join(', '):''}</div>
       <div style="padding:8px;background:#f7f3ee;border:1px solid #ccc;border-top:none">
       ${halls.map(h=>`${h.label?`<div style="font-size:11px;font-weight:700;color:#555;margin:5px 0 3px">${h.label}</div>`:''}
       ${h.matches.map((m,mi)=>`<div style="display:flex;align-items:center;gap:8px;padding:4px 8px;background:#fff;border:1px solid #ddd;border-radius:4px;margin-bottom:3px;font-size:12px">
@@ -1315,21 +1336,21 @@ document.addEventListener('DOMContentLoaded',()=>{
 
 <style>
 :root{
-  --ink:#e8edf5;--ink2:#c8d8f0;--dim:#6a7a94;--muted:#7a8fa8;
-  --s0:#0d1a2e;--s1:#112038;--s2:#1a2d48;--s3:#1e3558;
-  --bdr:rgba(100,160,255,.15);--bdr2:rgba(100,160,255,.3);
-  --grn:#1e8c45;--grn2:#166636;--grn-bg:rgba(30,140,69,.12);
-  --ylw:#d4890a;--ylw-bg:rgba(212,137,10,.12);
-  --red:#c0281a;--red-bg:rgba(192,40,26,.12);
-  --blu:#1a72d4;--blu-bg:rgba(26,114,212,.12);
-  --shadow:0 2px 12px rgba(0,0,0,.35);--shadow2:0 4px 24px rgba(0,0,0,.5);
+  --ink:#1a2636;--ink2:#0f1e30;--dim:#6a7a8f;--muted:#7a8a9a;
+  --s0:#f0f4f8;--s1:#ffffff;--s2:#e8edf3;--s3:#dde4ec;
+  --bdr:rgba(26,80,150,.13);--bdr2:rgba(26,80,150,.25);
+  --grn:#1b7a3a;--grn2:#145e2c;--grn-bg:rgba(27,122,58,.1);
+  --ylw:#b8720a;--ylw-bg:rgba(184,114,10,.1);
+  --red:#b02018;--red-bg:rgba(176,32,24,.1);
+  --blu:#1565c0;--blu-bg:rgba(21,101,192,.1);
+  --shadow:0 2px 12px rgba(26,60,100,.12);--shadow2:0 4px 24px rgba(26,60,100,.18);
   --r:10px;
 }
 *{ box-sizing:border-box; margin:0; padding:0; }
 html,body{ height:100%; background:var(--s0); color:var(--ink); font-family:'Exo 2',sans-serif; -webkit-font-smoothing:antialiased; }
 
 /* ── LOGIN ──────────────────────────────────────────── */
-#loginScreen{ min-height:100vh; display:flex; align-items:center; justify-content:center; padding:20px; background:linear-gradient(160deg,#06101e 0%,#0d1a2e 60%,#061420 100%); }
+#loginScreen{ min-height:100vh; display:flex; align-items:center; justify-content:center; padding:20px; background:linear-gradient(160deg,#dde8f5 0%,#eaf0f8 60%,#d8e4f0 100%); }
 .login-box{ background:var(--s1); border:1px solid var(--bdr2); border-radius:18px; padding:36px 28px; max-width:400px; width:100%; box-shadow:var(--shadow2); }
 .login-brand{ font-family:'Oswald',sans-serif; font-size:32px; font-weight:700; letter-spacing:2px; color:var(--ink2); margin-bottom:4px; text-align:center; }
 .login-sub{ text-align:center; font-size:13px; color:var(--muted); margin-bottom:24px; letter-spacing:.5px; }
@@ -1339,7 +1360,7 @@ html,body{ height:100%; background:var(--s0); color:var(--ink); font-family:'Exo
 .btn-google:hover{ background:var(--s3); }
 
 /* ── HEADER ─────────────────────────────────────────── */
-.hdr{ background:var(--s1);border-bottom:2px solid var(--bdr2);padding:0 16px;height:58px;display:flex;align-items:center;gap:12px;position:sticky;top:0;z-index:100;box-shadow:0 2px 12px rgba(0,0,0,.4); }
+.hdr{ background:var(--s1);border-bottom:2px solid var(--bdr2);padding:0 16px;height:58px;display:flex;align-items:center;gap:12px;position:sticky;top:0;z-index:100;box-shadow:0 2px 8px rgba(26,60,100,.12); }
 .hdr-brand{ font-family:'Oswald',sans-serif;font-size:20px;font-weight:700;letter-spacing:1.5px;color:var(--ink2);white-space:nowrap; }
 .hdr-user{ font-size:12px;color:var(--muted);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap; }
 .hdr-r{ display:flex;align-items:center;gap:8px; }
@@ -1348,30 +1369,30 @@ html,body{ height:100%; background:var(--s0); color:var(--ink); font-family:'Exo
 @media(max-width:767px){ .hdr-r{ display:none !important; } }
 .hdr-menu-btn{ display:none;background:none;border:none;cursor:pointer;padding:8px;border-radius:8px;flex-direction:column;gap:5px; }
 @media(max-width:767px){ .hdr-menu-btn{ display:flex; } }
-.hdr-menu-btn span{ display:block;width:20px;height:2px;background:#fff;border-radius:2px;transition:all .25s; }
+.hdr-menu-btn span{ display:block;width:20px;height:2px;background:var(--ink);border-radius:2px;transition:all .25s; }
 .hdr-menu-btn.open span:nth-child(1){ transform:translateY(7px) rotate(45deg); }
 .hdr-menu-btn.open span:nth-child(2){ opacity:0;transform:scaleX(0); }
 .hdr-menu-btn.open span:nth-child(3){ transform:translateY(-7px) rotate(-45deg); }
-.hdr-drawer{ display:none;position:fixed;top:58px;right:0;width:240px;background:var(--s1);border-left:1px solid rgba(255,255,255,.15);border-bottom:1px solid rgba(255,255,255,.15);border-radius:0 0 0 14px;box-shadow:-4px 4px 24px rgba(0,0,0,.4);z-index:299;flex-direction:column;padding:8px;gap:4px; }
+.hdr-drawer{ display:none;position:fixed;top:58px;right:0;width:240px;background:var(--s1);border-left:1px solid var(--bdr2);border-bottom:1px solid var(--bdr2);border-radius:0 0 0 14px;box-shadow:-4px 4px 20px rgba(26,60,100,.15);z-index:299;flex-direction:column;padding:8px;gap:4px; }
 .hdr-drawer.open{ display:flex;animation:drawerIn .2s ease; }
 @keyframes drawerIn{ from{opacity:0;transform:translateX(20px)}to{opacity:1;transform:none} }
-.hdr-drawer-btn{ background:none;border:none;color:#fff;padding:13px 16px;border-radius:8px;cursor:pointer;font-family:'Exo 2',sans-serif;font-size:14px;font-weight:600;text-align:left;width:100%;display:flex;align-items:center;gap:10px;transition:background .15s; }
-.hdr-drawer-btn:hover{ background:rgba(255,255,255,.12); }
+.hdr-drawer-btn{ background:none;border:none;color:var(--ink);padding:13px 16px;border-radius:8px;cursor:pointer;font-family:'Exo 2',sans-serif;font-size:14px;font-weight:600;text-align:left;width:100%;display:flex;align-items:center;gap:10px;transition:background .15s; }
+.hdr-drawer-btn:hover{ background:var(--s2); }
 .hdr-drawer-btn.drawer-danger{ color:#ff8070; }
-.hdr-drawer-sep{ height:1px;background:rgba(255,255,255,.1);margin:4px 0; }
+.hdr-drawer-sep{ height:1px;background:var(--bdr);margin:4px 0; }
 .hdr-drawer-overlay{ display:none;position:fixed;inset:0;z-index:298; }
 .hdr-drawer-overlay.open{ display:block; }
 
 /* ── ADMIN PANEL ─────────────────────────────────────── */
-.admin-panel{ background:var(--s1);color:#fff;padding:16px 20px;border-bottom:2px solid rgba(255,255,255,.1); }
+.admin-panel{ background:var(--s1);color:var(--ink);padding:16px 20px;border-bottom:2px solid var(--bdr); }
 .admin-panel-ttl{ font-family:'Oswald',sans-serif;font-size:16px;letter-spacing:1px;color:var(--ylw);margin-bottom:12px; }
 
 /* ── SPECTATOR NAV ───────────────────────────────────── */
-.spec-nav{ display:none;background:var(--s2);border-bottom:3px solid #2a4a80;padding:0 16px; }
+.spec-nav{ display:none;background:var(--s1);border-bottom:3px solid var(--bdr2);padding:0 16px; }
 .spec-nav.visible{ display:flex;gap:0;align-items:center; }
-.spec-nav-btn{ padding:13px 22px;font-family:'Oswald',sans-serif;font-size:14px;letter-spacing:.8px;text-transform:uppercase;color:rgba(255,255,255,.55);background:none;border:none;border-bottom:3px solid transparent;cursor:pointer;transition:all .15s;margin-bottom:-3px; }
-.spec-nav-btn:hover{ color:rgba(255,255,255,.85); }
-.spec-nav-btn.spec-nav-active{ color:#7adcff;border-bottom-color:#7adcff; }
+.spec-nav-btn{ padding:13px 22px;font-family:'Oswald',sans-serif;font-size:14px;letter-spacing:.8px;text-transform:uppercase;color:var(--dim);background:none;border:none;border-bottom:3px solid transparent;cursor:pointer;transition:all .15s;margin-bottom:-3px; }
+.spec-nav-btn:hover{ color:var(--ink); }
+.spec-nav-btn.spec-nav-active{ color:var(--blu);border-bottom-color:var(--blu); }
 .spec-nav-live-dot{ width:7px;height:7px;border-radius:50%;background:#ff4444;animation:blink 1.2s ease-in-out infinite;display:inline-block;margin-right:5px; }
 
 /* ── STEPS ───────────────────────────────────────────── */
@@ -1430,10 +1451,10 @@ input[type=checkbox]{ width:auto;margin-right:6px; }
 
 /* ── INFO BOXES ──────────────────────────────────────── */
 .info{ border-radius:var(--r);padding:14px 18px;font-size:13px;color:var(--muted);line-height:1.8;border:1px solid; }
-.info-g{ background:var(--grn-bg);border-color:#2a5038;border-left:4px solid var(--grn);color:#a0d4b4; }
-.info-y{ background:var(--ylw-bg);border-color:#5a3a10;border-left:4px solid var(--ylw);color:#d4b060; }
-.info-r{ background:var(--red-bg);border-color:#5a1010;border-left:4px solid var(--red);color:#d06060; }
-.info-b{ background:var(--blu-bg);border-color:#1a3a6a;border-left:4px solid var(--blu);color:#7ab0f0; }
+.info-g{ background:var(--grn-bg);border-color:#b0d8b8;border-left:4px solid var(--grn);color:#145e2c; }
+.info-y{ background:var(--ylw-bg);border-color:#e8c880;border-left:4px solid var(--ylw);color:#7a4e08; }
+.info-r{ background:var(--red-bg);border-color:#f0b0a0;border-left:4px solid var(--red);color:#8a1a10; }
+.info-b{ background:var(--blu-bg);border-color:#a0c0e8;border-left:4px solid var(--blu);color:#0d4a9a; }
 .info strong{ font-weight:700;color:inherit; }
 
 /* ── TEAM LIST ───────────────────────────────────────── */
@@ -1461,7 +1482,7 @@ input[type=checkbox]{ width:auto;margin-right:6px; }
 .wave-block{ padding:10px 14px;border-bottom:1px solid var(--bdr); }
 .wave-block:last-child{ border-bottom:none; }
 .wave-hdr{ font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:var(--muted);margin-bottom:6px;display:flex;align-items:center;gap:8px; }
-.rp-match{ display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--s0);border:1px solid var(--bdr);border-radius:7px;font-size:12px;margin-bottom:4px; }
+.rp-match{ display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--s2);border:1px solid var(--bdr);border-radius:7px;font-size:12px;margin-bottom:4px; }
 .rp-court{ font-weight:700;color:var(--dim);min-width:26px;font-family:'Oswald',sans-serif; }
 .rp-pair{ font-weight:700;color:var(--ink);flex:1; }
 .rp-vs{ color:var(--dim);font-weight:700;margin:0 4px; }
@@ -1618,20 +1639,20 @@ input[type=checkbox]{ width:auto;margin-right:6px; }
 
 <!-- OVERLAY LIVE FERMÉ -->
 <div id="liveClosedOverlay" style="display:none;position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.85);backdrop-filter:blur(6px);align-items:center;justify-content:center;padding:24px">
-  <div style="max-width:380px;width:100%;background:linear-gradient(160deg,#0d1a2e,#06101e);border:2px solid rgba(100,160,255,.25);border-radius:18px;padding:32px 24px;text-align:center;box-shadow:0 8px 40px rgba(0,0,0,.7)">
+  <div style="max-width:380px;width:100%;background:linear-gradient(160deg,#f0f4f8,#e8edf5);border:2px solid rgba(21,101,192,.25);border-radius:18px;padding:32px 24px;text-align:center;box-shadow:0 8px 40px rgba(0,0,0,.7)">
     <div style="font-size:52px;margin-bottom:12px">🔒</div>
-    <div style="font-family:'Oswald',sans-serif;font-size:22px;font-weight:700;color:#7adcff;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:16px">Live non disponible</div>
-    <div style="font-size:14px;color:rgba(255,255,255,.75);line-height:1.6;margin-bottom:10px">Le live n'est pas encore ouvert.</div>
-    <div style="font-size:13px;color:rgba(100,160,255,.7);background:rgba(100,160,255,.07);border:1px solid rgba(100,160,255,.2);border-radius:10px;padding:12px 16px;margin-bottom:24px;line-height:1.6">
+    <div style="font-family:'Oswald',sans-serif;font-size:22px;font-weight:700;color:#1565c0;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:16px">Live non disponible</div>
+    <div style="font-size:14px;color:var(--ink);line-height:1.6;margin-bottom:10px">Le live n'est pas encore ouvert.</div>
+    <div style="font-size:13px;color:var(--blu);background:var(--blu-bg);border:1px solid rgba(21,101,192,.2);border-radius:10px;padding:12px 16px;margin-bottom:24px;line-height:1.6">
       ⏰ Le live ouvrira environ <strong style="color:#7adcff">30 minutes avant le début</strong>.
     </div>
     <button onclick="document.getElementById('liveClosedOverlay').style.display='none'"
-      style="padding:12px 32px;background:linear-gradient(135deg,#0d1828,#1a2a48);border:2px solid #2a4a80;border-radius:10px;color:#7adcff;font-family:'Oswald',sans-serif;font-size:15px;font-weight:700;letter-spacing:1px;cursor:pointer;text-transform:uppercase;width:100%">
+      style="padding:12px 32px;background:linear-gradient(135deg,#e8edf5,#d8e4f0);border:2px solid #a0b8d8;border-radius:10px;color:#1565c0;font-family:'Oswald',sans-serif;font-size:15px;font-weight:700;letter-spacing:1px;cursor:pointer;text-transform:uppercase;width:100%">
       ← Retour
     </button>
     <div style="margin-top:16px;font-size:12px;color:rgba(255,255,255,.35)">
       <button onclick="document.getElementById('liveClosedOverlay').style.display='none';openReglement()"
-        style="background:none;border:none;color:rgba(255,255,255,.5);font-size:12px;text-decoration:underline;cursor:pointer;padding:0 4px">📋 Voir le règlement</button>
+        style="background:none;border:none;color:var(--muted);font-size:12px;text-decoration:underline;cursor:pointer;padding:0 4px">📋 Voir le règlement</button>
     </div>
   </div>
 </div>
@@ -1676,11 +1697,11 @@ input[type=checkbox]{ width:auto;margin-right:6px; }
       <div>
         <div class="admin-panel-ttl">➕ Créer un compte</div>
         <div style="display:flex;flex-direction:column;gap:10px">
-          <div><label style="color:rgba(255,255,255,.5)">Prénom / Nom</label><input type="text" id="newU_name" placeholder="Marie Dupont" style="background:#1a2d48;border-color:#2a4a80;color:#fff"></div>
-          <div><label style="color:rgba(255,255,255,.5)">Email</label><input type="email" id="newU_email" placeholder="marie@exemple.com" style="background:#1a2d48;border-color:#2a4a80;color:#fff"></div>
-          <div><label style="color:rgba(255,255,255,.5)">Mot de passe (6 car. min)</label><input type="password" id="newU_pwd" placeholder="••••••••" style="background:#1a2d48;border-color:#2a4a80;color:#fff"></div>
+          <div><label style="color:var(--muted)">Prénom / Nom</label><input type="text" id="newU_name" placeholder="Marie Dupont" style="background:var(--s2);border-color:var(--bdr2);color:var(--ink)"></div>
+          <div><label style="color:var(--muted)">Email</label><input type="email" id="newU_email" placeholder="marie@exemple.com" style="background:var(--s2);border-color:var(--bdr2);color:var(--ink)"></div>
+          <div><label style="color:var(--muted)">Mot de passe (6 car. min)</label><input type="password" id="newU_pwd" placeholder="••••••••" style="background:var(--s2);border-color:var(--bdr2);color:var(--ink)"></div>
           <div style="display:flex;gap:10px;align-items:flex-end">
-            <div style="flex:1"><label style="color:rgba(255,255,255,.5)">Rôle</label><select id="newU_role" style="background:#1a2d48;border-color:#2a4a80;color:#fff"><option value="scorer">✏️ Scorer</option><option value="spectator">👁 Spectateur</option><option value="admin">👑 Admin</option></select></div>
+            <div style="flex:1"><label style="color:var(--muted)">Rôle</label><select id="newU_role" style="background:var(--s2);border-color:var(--bdr2);color:var(--ink)"><option value="scorer">✏️ Scorer</option><option value="spectator">👁 Spectateur</option><option value="admin">👑 Admin</option></select></div>
             <button class="btn btn-g btn-sm" onclick="adminCreateUser()">✓ Créer</button>
           </div>
           <div id="newUserMsg" style="font-size:13px;min-height:18px"></div>
@@ -1689,9 +1710,9 @@ input[type=checkbox]{ width:auto;margin-right:6px; }
       <div>
         <div class="admin-panel-ttl">🔑 Modifier un rôle</div>
         <div style="display:flex;flex-direction:column;gap:10px">
-          <div><label style="color:rgba(255,255,255,.5)">UID utilisateur</label><input type="text" id="adminUidInput" placeholder="Firebase UID" style="background:#1a2d48;border-color:#2a4a80;color:#fff"></div>
+          <div><label style="color:var(--muted)">UID utilisateur</label><input type="text" id="adminUidInput" placeholder="Firebase UID" style="background:var(--s2);border-color:var(--bdr2);color:var(--ink)"></div>
           <div style="display:flex;gap:10px;align-items:flex-end">
-            <div style="flex:1"><label style="color:rgba(255,255,255,.5)">Nouveau rôle</label><select id="adminRoleSelect" style="background:#1a2d48;border-color:#2a4a80;color:#fff"><option value="admin">👑 Admin</option><option value="scorer" selected>✏️ Scorer</option><option value="spectator">👁 Spectateur</option></select></div>
+            <div style="flex:1"><label style="color:var(--muted)">Nouveau rôle</label><select id="adminRoleSelect" style="background:var(--s2);border-color:var(--bdr2);color:var(--ink)"><option value="admin">👑 Admin</option><option value="scorer" selected>✏️ Scorer</option><option value="spectator">👁 Spectateur</option></select></div>
             <button class="btn btn-y btn-sm" onclick="setUserRole()">Appliquer</button>
           </div>
           <div id="adminRoleMsg" style="font-size:13px;min-height:18px"></div>
@@ -1699,7 +1720,7 @@ input[type=checkbox]{ width:auto;margin-right:6px; }
       </div>
       <div style="grid-column:1/-1;margin-top:16px;border-top:1px solid rgba(255,255,255,.1);padding-top:16px">
         <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
-          <div class="admin-panel-ttl" style="margin-bottom:0">👥 Utilisateurs</div>
+          <div class="admin-panel-ttl" style="margin-bottom:0;color:var(--ylw)">👥 Utilisateurs</div>
           <button onclick="loadUserList()" style="background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.2);color:#fff;padding:4px 14px;border-radius:6px;cursor:pointer;font-size:12px">🔄 Rafraîchir</button>
         </div>
         <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;min-width:480px"><thead><tr style="border-bottom:1px solid rgba(255,255,255,.15)"><th style="text-align:left;padding:6px;font-size:11px;color:rgba(255,255,255,.4);font-weight:700;text-transform:uppercase">Nom</th><th style="text-align:left;padding:6px;font-size:11px;color:rgba(255,255,255,.4);font-weight:700;text-transform:uppercase">Email</th><th style="text-align:left;padding:6px;font-size:11px;color:rgba(255,255,255,.4);font-weight:700;text-transform:uppercase">Rôle</th><th style="padding:6px;font-size:11px;color:rgba(255,255,255,.4);font-weight:700;text-transform:uppercase">Action</th></tr></thead><tbody id="userListBody"><tr><td colspan="4" style="color:rgba(255,255,255,.3);font-size:13px;padding:10px 0">Cliquez sur Rafraîchir.</td></tr></tbody></table></div>
@@ -1755,7 +1776,7 @@ input[type=checkbox]{ width:auto;margin-right:6px; }
         <div>
           <label>Nombre d'équipes</label>
           <select id="cfg_n" onchange="onCfgChange()">
-            <option value="30">30 équipes</option><option value="32" selected>32 équipes</option><option value="34">34</option><option value="36">36</option><option value="38">38</option><option value="40">40 équipes</option><option value="42">42</option><option value="44">44</option><option value="46">46</option><option value="48">48 équipes</option><option value="50">50</option><option value="52">52</option><option value="54">54</option><option value="56">56</option><option value="58">58</option><option value="60">60 équipes</option><option value="64">64</option><option value="68">68</option><option value="72">72</option><option value="76">76</option><option value="80">80 équipes</option><option value="84">84</option><option value="88">88</option><option value="92">92</option><option value="96">96</option><option value="100">100 équipes</option>
+            <option value="30">30 équipes</option><option value="31">31 équipes</option><option value="32" selected>32 équipes</option><option value="33">33 équipes</option><option value="34">34 équipes</option><option value="35">35 équipes</option><option value="36">36 équipes</option><option value="37">37 équipes</option><option value="38">38 équipes</option><option value="39">39 équipes</option><option value="40">40 équipes</option><option value="41">41 équipes</option><option value="42">42 équipes</option><option value="43">43 équipes</option><option value="44">44 équipes</option><option value="45">45 équipes</option><option value="46">46 équipes</option><option value="47">47 équipes</option><option value="48">48 équipes</option><option value="49">49 équipes</option><option value="50">50 équipes</option><option value="51">51 équipes</option><option value="52">52 équipes</option><option value="53">53 équipes</option><option value="54">54 équipes</option><option value="55">55 équipes</option><option value="56">56 équipes</option><option value="57">57 équipes</option><option value="58">58 équipes</option><option value="59">59 équipes</option><option value="60">60 équipes</option><option value="61">61 équipes</option><option value="62">62 équipes</option><option value="63">63 équipes</option><option value="64">64 équipes</option><option value="65">65 équipes</option><option value="66">66 équipes</option><option value="67">67 équipes</option><option value="68">68 équipes</option><option value="69">69 équipes</option><option value="70">70 équipes</option><option value="71">71 équipes</option><option value="72">72 équipes</option><option value="73">73 équipes</option><option value="74">74 équipes</option><option value="75">75 équipes</option><option value="76">76 équipes</option><option value="77">77 équipes</option><option value="78">78 équipes</option><option value="79">79 équipes</option><option value="80">80 équipes</option><option value="81">81 équipes</option><option value="82">82 équipes</option><option value="83">83 équipes</option><option value="84">84 équipes</option><option value="85">85 équipes</option><option value="86">86 équipes</option><option value="87">87 équipes</option><option value="88">88 équipes</option><option value="89">89 équipes</option><option value="90">90 équipes</option><option value="91">91 équipes</option><option value="92">92 équipes</option><option value="93">93 équipes</option><option value="94">94 équipes</option><option value="95">95 équipes</option><option value="96">96 équipes</option><option value="97">97 équipes</option><option value="98">98 équipes</option><option value="99">99 équipes</option><option value="100">100 équipes</option>
           </select>
         </div>
         <div>
@@ -1780,10 +1801,30 @@ input[type=checkbox]{ width:auto;margin-right:6px; }
     <div class="fg">
       <div class="fr">
         <div>
+          <label>Total matchs par équipe</label>
+          <select id="cfg_total_matches" onchange="onCfgChange()">
+            <option value="4">4 matchs</option>
+            <option value="5">5 matchs</option>
+            <option value="6">6 matchs</option>
+            <option value="7" selected>7 matchs</option>
+            <option value="8">8 matchs</option>
+            <option value="9">9 matchs</option>
+            <option value="10">10 matchs</option>
+            <option value="11">11 matchs</option>
+            <option value="12">12 matchs</option>
+          </select>
+        </div>
+        <div>
           <label>Matchs le matin</label>
           <select id="cfg_morning" onchange="onCfgChange()">
-            <option value="3" selected>3 matchs le matin</option>
-            <option value="4">4 matchs le matin</option>
+            <option value="1">1 matin</option>
+            <option value="2">2 matin</option>
+            <option value="3" selected>3 matin</option>
+            <option value="4">4 matin</option>
+            <option value="5">5 matin</option>
+            <option value="6">6 matin</option>
+            <option value="7">7 matin</option>
+            <option value="8">8 matin</option>
           </select>
         </div>
         <div>
@@ -2008,97 +2049,191 @@ input[type=checkbox]{ width:auto;margin-right:6px; }
 <!-- ══ PAGE RÈGLEMENT ══ -->
 <div class="page" id="pageR">
 <div class="wrap">
-  <div class="sec-ttl">📋 Règlement du tournoi interclub</div>
+  <div class="sec-ttl">📋 Règlement officiel — Tournoi Interclub Pickleball</div>
 
   <div class="card">
-    <div class="card-ttl">🎯 Format interclub</div>
+    <div class="card-ttl">🎯 Article 1 — Format et esprit du tournoi</div>
     <div class="rules-section">
-      <p>Le tournoi interclub de pickleball oppose des <strong>équipes de 2 joueurs</strong> fixes. Les deux partenaires restent ensemble pour toute la durée du tournoi — il n'y a pas de rotation des partenaires comme dans le format Americano.</p>
+      <p>Le tournoi interclub de pickleball oppose des <strong>équipes fixes de 2 joueurs</strong>. Les deux partenaires demeurent associés pour l'intégralité de la journée. Ce format favorise la cohésion d'équipe et l'identité des clubs.</p>
       <ul>
-        <li>Chaque équipe est représentée par un nom et un club d'appartenance.</li>
-        <li>Les deux joueurs d'une équipe ne changent jamais de partenaire.</li>
-        <li>Le tournoi se déroule en deux sessions : matin et après-midi.</li>
-        <li>Si le tournoi utilise 2 salles, chaque équipe reste dans la même salle toute la journée.</li>
+        <li>Chaque équipe est identifiée par un nom et un club d'appartenance.</li>
+        <li>Les partenaires ne peuvent en aucun cas être changés en cours de tournoi.</li>
+        <li>Le tournoi se déroule en deux sessions : <strong>matin</strong> et <strong>après-midi</strong>, séparées ou non par une coupure déjeuner.</li>
+        <li>Le nombre total de matchs par équipe est défini avant le début du tournoi (de 4 à 12 matchs selon la configuration).</li>
+        <li>En configuration <strong>2 salles</strong>, chaque équipe est affectée à une salle dès le début et n'en change pas.</li>
       </ul>
     </div>
   </div>
 
   <div class="card mt12">
-    <div class="card-ttl">📅 Organisation des sessions</div>
+    <div class="card-ttl">👥 Article 2 — Inscription et composition des équipes</div>
     <div class="rules-section">
-      <h4>Matin et après-midi</h4>
+      <h4>Composition</h4>
       <ul>
-        <li>Le tournoi prévoit <strong>3 ou 4 matchs le matin</strong> et le nombre complémentaire l'après-midi (4 ou 3), pour un total de 7 matchs par équipe.</li>
-        <li>Si une <strong>coupure déjeuner</strong> est configurée, les équipes ont une pause définie entre les deux sessions.</li>
+        <li>Chaque équipe est composée de <strong>2 joueurs licenciés</strong> (ou autorisés par l'organisateur).</li>
+        <li>Un joueur ne peut appartenir qu'à une seule équipe.</li>
+        <li>En cas de forfait d'un joueur avant le tournoi, l'équipe peut être remplacée ou retirée selon décision de l'organisateur.</li>
+      </ul>
+      <h4>Niveau</h4>
+      <ul>
+        <li>Un niveau de 1 (débutant) à 5 (expert) est attribué à chaque équipe lors de l'inscription.</li>
+        <li>Ce niveau est utilisé par l'algorithme d'appariement pour équilibrer les matchs.</li>
+        <li>L'organisateur se réserve le droit de reclasser une équipe si son niveau déclaré est manifestement incorrect.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="card mt12">
+    <div class="card-ttl">🏟️ Article 3 — Organisation du tournoi et des salles</div>
+    <div class="rules-section">
+      <h4>Sessions</h4>
+      <ul>
+        <li>La journée est divisée en une session <strong>matin</strong> et une session <strong>après-midi</strong>.</li>
+        <li>Le nombre de matchs dans chaque session est fixé par l'organisateur avant le début.</li>
+        <li>Une <strong>coupure déjeuner</strong> peut être prévue entre les deux sessions (durée configurable).</li>
         <li>Les terrains sont remplis au maximum à chaque tour pour limiter les temps d'attente.</li>
       </ul>
-      <h4>Salles</h4>
+      <h4>Configuration des salles</h4>
       <ul>
-        <li>En configuration <strong>1 salle</strong> : toutes les équipes jouent dans le même gymnase.</li>
-        <li>En configuration <strong>2 salles</strong> : les équipes sont réparties entre les deux salles dès le début du tournoi et n'en changent pas. L'admin peut affecter manuellement chaque équipe à une salle, ou laisser la répartition automatique.</li>
+        <li><strong>1 salle</strong> : toutes les équipes jouent dans le même espace.</li>
+        <li><strong>2 salles</strong> : les équipes sont réparties équitablement entre les salles. L'admin peut affecter manuellement chaque équipe ou laisser la répartition automatique.</li>
+        <li>En cas de déséquilibre d'équipes dans une salle (nombre impair), une équipe sera exemptée à tour de rôle.</li>
       </ul>
     </div>
   </div>
 
   <div class="card mt12">
-    <div class="card-ttl">⚖️ Appariement des équipes</div>
+    <div class="card-ttl">⚖️ Article 4 — Appariement des équipes</div>
     <div class="rules-section">
-      <p>À chaque tour, l'algorithme génère les matchs en respectant les priorités suivantes :</p>
+      <p>À chaque tour, l'algorithme génère les matchs selon les priorités suivantes, par ordre décroissant :</p>
       <ul>
-        <li><strong>Éviter les équipes du même club</strong> : autant que possible, deux équipes provenant du même club ne s'affrontent pas.</li>
-        <li><strong>Minimiser les répétitions</strong> : deux équipes qui se sont déjà rencontrées ne rejouent pas ensemble si d'autres options existent.</li>
-        <li><strong>Équilibre de niveau</strong> (si activé) : les équipes de niveau similaire sont prioritairement opposées.</li>
-        <li>Si le nombre d'équipes est impair dans une salle, une équipe est exemptée (au repos) à chaque tour, à rotation équitable.</li>
+        <li><strong>1. Éviter les confrontations intra-club</strong> : deux équipes du même club ne s'affrontent pas si d'autres options existent.</li>
+        <li><strong>2. Minimiser les répétitions d'adversaires</strong> : deux équipes déjà rencontrées ne se retrouvent pas si possible.</li>
+        <li><strong>3. Équilibre de niveau</strong> (si option activée) : les équipes de force similaire sont prioritairement opposées pour garantir des matchs compétitifs.</li>
+        <li><strong>4. Équité des exemptions</strong> : si une équipe doit être exemptée (salle impaire), la sélection est effectuée de manière à ce que chaque équipe soit exemptée aussi rarement et aussi équitablement que possible.</li>
       </ul>
+      <p>L'algorithme effectue jusqu'à 30 tentatives par tour afin de trouver le meilleur appariement possible. En cas de contraintes impossibles à satisfaire toutes simultanément, les priorités supérieures priment.</p>
     </div>
   </div>
 
   <div class="card mt12">
-    <div class="card-ttl">🏆 Points et classement</div>
+    <div class="card-ttl">🏆 Article 5 — Système de points et classement</div>
     <div class="rules-section">
       <h4>Points par match</h4>
       <ul>
         <li><strong>Victoire</strong> : <strong>3 points</strong></li>
-        <li><strong>Match nul</strong> : <strong>2 points</strong> pour chaque équipe</li>
+        <li><strong>Match nul</strong> (scores égaux) : <strong>2 points</strong> pour chaque équipe</li>
         <li><strong>Défaite</strong> : <strong>0 point</strong></li>
       </ul>
       <h4>Exemption (tour au repos)</h4>
       <ul>
-        <li>Une équipe exemptée reçoit <strong>2 points de compensation</strong> (équivalent match nul 0–0), garantissant l'équité.</li>
-        <li>La rotation des exemptions est gérée pour que chaque équipe soit exemptée le moins souvent possible et de manière équitable.</li>
+        <li>Une équipe exemptée reçoit automatiquement <strong>2 points de compensation</strong>, équivalent à un match nul (score 0–0).</li>
+        <li>L'exemption est notée dans le classement avec l'icône 🟡. Elle ne compte pas comme un match joué.</li>
       </ul>
-      <h4>Départage (à égalité de points)</h4>
-      <ol style="padding-left:18px;font-size:13px;color:var(--muted);line-height:2">
+      <h4>Score des matchs</h4>
+      <ul>
+        <li>Les matchs se jouent sur un seul set. Le score exact (buts marqués / buts encaissés) est saisi par l'organisateur.</li>
+        <li>Le score est utilisé pour le calcul du goal-average en cas d'égalité de points.</li>
+      </ul>
+      <h4>Ordre de départage (à égalité de points)</h4>
+      <ol style="padding-left:18px;font-size:13px;color:var(--muted);line-height:2.2">
         <li>Points totaux</li>
-        <li>Goal-average général (buts marqués − buts encaissés)</li>
-        <li>Goal-average particulier (confrontation directe entre ex-æquo)</li>
-        <li>Buts marqués (total)</li>
+        <li>Goal-average général (buts marqués − buts encaissés, tous matchs)</li>
+        <li>Goal-average particulier (confrontation directe entre équipes ex-æquo)</li>
+        <li>Nombre de buts marqués (total)</li>
         <li>Nombre de victoires</li>
         <li>Nombre de matchs joués</li>
+        <li>Tirage au sort (si toujours à égalité)</li>
       </ol>
     </div>
   </div>
 
   <div class="card mt12">
-    <div class="card-ttl">🛡️ Règles pratiques</div>
+    <div class="card-ttl">🎾 Article 6 — Règles de jeu</div>
+    <div class="rules-section">
+      <h4>Format de match</h4>
+      <ul>
+        <li>Chaque match oppose deux équipes de 2 joueurs en double.</li>
+        <li>Le match se joue selon les <strong>règles officielles de l'IFP (International Federation of Pickleball)</strong>.</li>
+        <li>La durée des matchs est fixée par l'organisateur (chronomètre disponible dans l'application).</li>
+        <li>Le score final au moment du signal de fin de temps est le score officiel du match.</li>
+      </ul>
+      <h4>Service</h4>
+      <ul>
+        <li>Le service doit être effectué en diagonale, sous la main (underhand), en dessous de la ceinture.</li>
+        <li>Le serveur doit avoir les deux pieds derrière la ligne de fond.</li>
+        <li>En cas de let (balle touchant le filet et retombant dans la zone de service correcte), le service est à rejouer.</li>
+      </ul>
+      <h4>La cuisine (Non-Volley Zone)</h4>
+      <ul>
+        <li>Il est interdit de volleyer (frapper la balle avant rebond) depuis la zone de cuisine (les 2,13 m de part et d'autre du filet).</li>
+        <li>Un joueur ne peut pas entrer dans la cuisine pour volleyer, même si ses pieds franchissent la ligne après la frappe.</li>
+      </ul>
+      <h4>La règle des deux rebonds (Double Bounce Rule)</h4>
+      <ul>
+        <li>Lors du service, la balle doit rebondir une fois côté receveur avant d'être renvoyée, et une fois côté serveur avant d'être renvoyée. Après ces deux rebonds, les équipes peuvent volleyer ou laisser rebondir.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="card mt12">
+    <div class="card-ttl">🛡️ Article 7 — Obligations et comportement</div>
     <div class="rules-section">
       <h4>Avant le tournoi</h4>
       <ul>
-        <li>Les équipes s'échauffent au minimum 10 minutes avant leurs premiers matchs.</li>
-        <li>Chaque équipe est responsable de son équipement (raquettes, tenue).</li>
-        <li>Les joueurs doivent être présents sur leur terrain <strong>2 minutes avant l'heure prévue</strong>.</li>
+        <li>Les équipes doivent s'échauffer au minimum <strong>10 minutes</strong> avant leurs premiers matchs.</li>
+        <li>Chaque joueur est responsable de son équipement : raquette homologuée, tenue sportive adaptée, chaussures de sport intérieur.</li>
+        <li>Les joueurs doivent se présenter sur leur terrain <strong>au moins 2 minutes avant l'heure prévue</strong>.</li>
       </ul>
       <h4>Pendant le tournoi</h4>
       <ul>
-        <li>En cas d'absence, un match peut être déclaré forfait après 5 minutes d'attente.</li>
-        <li>Toute blessure doit être signalée immédiatement à l'organisateur.</li>
-        <li>En cas de balle étrangère sur le terrain, annoncer « Let ! » pour rejouer le point.</li>
+        <li>En cas de retard, un match peut être déclaré <strong>forfait après 5 minutes d'attente</strong> à compter de l'heure officielle.</li>
+        <li>Un forfait est compté <strong>11–0</strong> en faveur de l'équipe présente (sauf décision contraire de l'organisateur).</li>
+        <li>Toute blessure doit être signalée immédiatement à l'organisateur. Aucun point n'est accordé en cas d'abandon pour blessure.</li>
+        <li>En cas de balle extérieure sur le terrain : annoncer « Let ! » — le point est à rejouer.</li>
       </ul>
-      <h4>Scores</h4>
+      <h4>Fair-play et conduite</h4>
       <ul>
-        <li>Les scores sont saisis par les organisateurs (rôles admin ou scorer).</li>
-        <li>Le classement se met à jour en temps réel sur tous les appareils connectés.</li>
-        <li>Les spectateurs peuvent suivre le Live et le Classement en accès libre (si le live est ouvert).</li>
+        <li>Le respect des adversaires, des arbitres et des organisateurs est obligatoire.</li>
+        <li>Tout comportement antisportif (contestation excessive, insultes, gestes déplacés) peut entraîner un avertissement, puis une disqualification.</li>
+        <li>Les joueurs sont responsables du respect des règles. En cas de litige, l'organisateur tranche définitivement.</li>
+        <li>L'esprit du pickleball est avant tout de s'amuser et de favoriser la convivialité entre clubs !</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="card mt12">
+    <div class="card-ttl">📱 Article 8 — Scores, live et classement</div>
+    <div class="rules-section">
+      <ul>
+        <li>Les scores sont saisis exclusivement par les personnes ayant un rôle <strong>Admin</strong> ou <strong>Scorer</strong> dans l'application.</li>
+        <li>Le classement se met à jour en <strong>temps réel</strong> sur tous les appareils connectés dès qu'un score est enregistré.</li>
+        <li>Les spectateurs peuvent accéder au <strong>Live</strong> et au <strong>Classement</strong> en accès libre lorsque le live est ouvert par l'organisateur (environ 30 minutes avant le début).</li>
+        <li>En cas d'erreur de saisie, seul un Admin ou Scorer peut corriger le score.</li>
+        <li>Le classement affiché dans l'application fait foi pour l'attribution des récompenses.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="card mt12">
+    <div class="card-ttl">🏅 Article 9 — Récompenses</div>
+    <div class="rules-section">
+      <ul>
+        <li>Le podium (1ère, 2ème et 3ème place) est déterminé d'après le classement final.</li>
+        <li>Les récompenses (trophées, lots, etc.) sont remises à l'issue du tournoi lors de la cérémonie de clôture.</li>
+        <li>En cas de réclamation sur le classement, celle-ci doit être formulée <strong>avant la remise des prix</strong> auprès de l'organisateur.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="card mt12">
+    <div class="card-ttl">📝 Article 10 — Dispositions générales</div>
+    <div class="rules-section">
+      <ul>
+        <li>La participation au tournoi implique l'acceptation de l'intégralité du présent règlement.</li>
+        <li>L'organisateur se réserve le droit de modifier les règles ou le planning en cours de journée en cas de force majeure, et en informera les participants.</li>
+        <li>Tout cas non prévu par le règlement sera tranché par l'organisateur, dont la décision est définitive et sans appel.</li>
+        <li>Ce règlement est disponible en accès libre depuis l'application, sur l'écran d'accueil (bouton Règlement).</li>
       </ul>
     </div>
   </div>
