@@ -26,14 +26,15 @@
   } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js';
 
   // Configuration Firebase
-  const firebaseConfig = {
-    apiKey: "AIzaSyBsCg5WVNstYKIZn3aPqN6Cv4MpPzWnbNI",
-    authDomain: "tournoi-rsth.firebaseapp.com",
-    projectId: "tournoi-rsth",
-    storageBucket: "tournoi-rsth.firebasestorage.app",
-    messagingSenderId: "833379171129",
-    appId: "1:833379171129:web:8bf463c6ccaf66b74806e8"
-  };
+// Dans votre configuration Firebase
+const firebaseConfig = {
+  apiKey: "AIzaSyBsCg5WVNstYKIZn3aPqN6Cv4MpPzWnbNI",
+  authDomain: "tournoi-rsth.firebaseapp.com", // ✅ Utilisez authDomain
+  projectId: "tournoi-rsth",
+  storageBucket: "tournoi-rsth.appspot.com",
+  messagingSenderId: "833379171129",
+  appId: "1:833379171129:web:..."
+};
 
   // Initialisation Firebase (une seule fois)
   const app = initializeApp(firebaseConfig);
