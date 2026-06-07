@@ -22,7 +22,7 @@
 <script type="module">
 import { initializeApp }            from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
 import { getAuth, onAuthStateChanged, signInWithEmailAndPassword,
-         createUserWithEmailAndPassword, signInWithPopup, signInWithRedirect,
+         createUserWithEmailAndPassword, signInWithRedirect,
          getRedirectResult, GoogleAuthProvider,
          signOut, updateProfile }   from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js';
 import { getFirestore, doc, getDoc, setDoc, deleteDoc, onSnapshot, collection,
@@ -158,18 +158,8 @@ window.loginEmail = async function(){
   catch(e){ showAuthMsg(authErrMsg(e.code),'red'); }
 };
 window.loginGoogle = async function(){
-  try {
-    // Try popup first; if blocked by COOP (file:// or strict COOP headers), fall back to redirect
-    await signInWithPopup(auth, gProvider);
-  } catch(e){
-    if(e.code === 'auth/popup-blocked' || e.code === 'auth/cancelled-popup-request' ||
-       e.message && e.message.includes('Cross-Origin')) {
-      try { await signInWithRedirect(auth, gProvider); }
-      catch(e2){ showAuthMsg(authErrMsg(e2.code),'red'); }
-    } else {
-      showAuthMsg(authErrMsg(e.code),'red');
-    }
-  }
+  try { await signInWithRedirect(auth, gProvider); }
+  catch(e){ showAuthMsg(authErrMsg(e.code),'red'); }
 };
 window.logout = async function(){
   clearInterval(ST.timerIv); unsubAll();
