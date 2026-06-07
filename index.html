@@ -29,7 +29,23 @@ import { getFirestore, doc, getDoc, setDoc, deleteDoc, onSnapshot, collection,
          addDoc, updateDoc, serverTimestamp, query, orderBy }
                                     from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js';
 
-const firebaseConfig = {  apiKey: "AIzaSyBp-O2wp8eA_QOWJnxtkpko4CP7AH-3zF4",  authDomain: "tournoi-rsth-intergroupes.firebaseapp.com",  projectId: "tournoi-rsth-intergroupes",  storageBucket: "tournoi-rsth-intergroupes.firebasestorage.app",  messagingSenderId: "661309250088",  appId: "1:661309250088:web:9519d7ec1de0a8fb9af31d"};
+// Import the functions you need from the SDKs you need
+import { initializeApp } from "firebase/app";
+// TODO: Add SDKs for Firebase products that you want to use
+// https://firebase.google.com/docs/web/setup#available-libraries
+
+// Your web app's Firebase configuration
+const firebaseConfig = {
+  apiKey: "AIzaSyBsCg5WVNstYKIZn3aPqN6Cv4MpPzWnbNI",
+  authDomain: "tournoi-rsth.firebaseapp.com",
+  projectId: "tournoi-rsth",
+  storageBucket: "tournoi-rsth.firebasestorage.app",
+  messagingSenderId: "833379171129",
+  appId: "1:833379171129:web:8bf463c6ccaf66b74806e8"
+};
+
+// Initialize Firebase
+const app = initializeApp(firebaseConfig);
 const app       = initializeApp(firebaseConfig);
 const auth      = getAuth(app);
 const db        = getFirestore(app);
