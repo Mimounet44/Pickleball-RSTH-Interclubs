@@ -28,15 +28,7 @@ import { getFirestore, doc, getDoc, setDoc, deleteDoc, onSnapshot, collection,
          addDoc, updateDoc, serverTimestamp, query, orderBy }
                                     from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js';
 
-const firebaseConfig = {
-  apiKey: "AIzaSyAvppGIS7M12LFgaPEuFdo-ed6rrAtgcSc",
-  authDomain: "tournoi-de-pickleball-flexible.firebaseapp.com",
-  projectId: "tournoi-de-pickleball-flexible",
-  storageBucket: "tournoi-de-pickleball-flexible.firebasestorage.app",
-  messagingSenderId: "64638196209",
-  appId: "1:64638196209:web:dd47d079b5698ee80fcc50"
-};
-
+const firebaseConfig = {  apiKey: "AIzaSyCuOP-EwHzOo1p-WeNu0gQbWyv97kA6T5M",  authDomain: "pickleball-clean.firebaseapp.com",  databaseURL: "https://pickleball-clean-default-rtdb.europe-west1.firebasedatabase.app",  projectId: "pickleball-clean",  storageBucket: "pickleball-clean.firebasestorage.app",  messagingSenderId: "1095429902544",  appId: "1:1095429902544:web:5d6cb487b7c69f27480ed5"};
 const app       = initializeApp(firebaseConfig);
 const auth      = getAuth(app);
 const db        = getFirestore(app);
