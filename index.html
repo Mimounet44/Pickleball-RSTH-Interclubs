@@ -402,7 +402,8 @@ function buildSchedule(){
             const sc=rep*5+((tClub(tA)&&tClub(tB)&&tClub(tA)!=='—'&&tClub(tA)===tClub(tB))?10:0)+Math.random()*0.3;
             if(sc<bestOS){bestOS=sc;bestOpp=tB;}
           }
-          if(bestOpp){ms.push({tA,tB});used.add(tA);used.add(tB);score+=bestOS;}
+          if(bestOpp){ms.push({tA:tA,tB:bestOpp});
+used.add(bestOpp);used.add(tA);used.add(tB);score+=bestOS;}
         }
         if(ms.length>0&&score<bestS){bestS=score;bestM=ms;}
         if(bestM&&bestM.length===maxM&&bestS<0.5) break;
