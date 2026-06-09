@@ -2,7 +2,6 @@
 <html lang="fr">
 <head>
 <script>
-  // Auto-rechargement à la première ouverture de chaque session
   if(!sessionStorage.getItem('_reloaded')){
     sessionStorage.setItem('_reloaded','1');
     location.reload(true);
@@ -17,9 +16,6 @@
 <title>🏓 Pickleball Interclub</title>
 <link href="https://fonts.googleapis.com/css2?family=Exo+2:wght@300;400;600;700;900&family=Oswald:wght@400;500;600;700&display=swap" rel="stylesheet">
 
-<!-- ══════════════════════════════════════════════════════════
-     🔥 FIREBASE CONFIG
-     ══════════════════════════════════════════════════════════ -->
 <script type="module">
 import { initializeApp }            from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
 import { getAuth, onAuthStateChanged, signInWithEmailAndPassword,
@@ -45,240 +41,164 @@ const gProvider = new GoogleAuthProvider();
 
 // ══════════════════════════════════════════════════════════
 // ÉTAT GLOBAL
-// Rôles : 'admin' | 'scorer' | 'spectator'
-//   admin   → tout
-//   scorer  → saisie scores + modification noms joueurs uniquement
-//   spectator → lecture seule
 // ══════════════════════════════════════════════════════════
 let CURRENT_USER = null;
 let USER_ROLE    = null;
 let unsubTournament = null;
 let unsubResults    = null;
 
+// CFG par défaut : 2 salles, poules séparées, vagues configurables
+const DEFAULT_CFG = {
+  n:32, halls:1,
+  t1:8, t2:5,            // terrains salle 1 et salle 2
+  waves1:2, waves2:2,    // vagues par tour par salle
+  r:7,                   // matchs/équipe (= tours)
+  matchesMorning:4, lunchBreak:true, lunchDuration:60, lunchStart:'12:30',
+  mt:15, tt:3, tp:5,
+  bal:'level', start:'09:00'
+};
+
 const ST = {
   page:1, prevPage:1, rulesOpen:false,
-  players:[],
   teams:[],
-  schedule:[],
+  schedule:[],   // [{roundTime, session, wavesH1:[], wavesH2:[], subs:[]}]
   results:{},
   activeRound:0,
   liveOpen:false,
   timerSec:0, timerRun:false, timerMode:'match', timerIv:null,
-  cfg:{n:32,t:8,r:7,mt:15,tt:3,tp:5,bal:'level',start:'09:00',
-       halls:1,t2:8,matchesMorning:3,lunchBreak:true,lunchDuration:60,lunchStart:'12:30'},
+  cfg: {...DEFAULT_CFG},
   sub:{targetId:null,selId:null}
 };
 
-// ─── Helpers rôle ───────────────────────────────────────
 function isAdmin()  { return USER_ROLE === 'admin'; }
 function isScorer() { return USER_ROLE === 'admin' || USER_ROLE === 'scorer'; }
-// Live bloqué = spectateur ET liveOpen pas encore true
 function isLiveBlocked(){ return USER_ROLE === 'spectator' && !ST.liveOpen; }
 
 // ══════════════════════════════════════════════════════════
 // AUTH
 // ══════════════════════════════════════════════════════════
 async function getUserRole(uid){
-  try {
-    const snap = await getDoc(doc(db,'users',uid));
-    if(snap.exists()) return snap.data().role || 'spectator';
-  } catch(e){}
+  try { const snap = await getDoc(doc(db,'users',uid)); if(snap.exists()) return snap.data().role||'spectator'; } catch(e){}
   return 'spectator';
 }
 async function ensureUserDoc(user){
-  const ref  = doc(db,'users',user.uid);
-  const snap = await getDoc(ref);
-  if(!snap.exists()){
-    await setDoc(ref,{
-      email: user.email,
-      name:  user.displayName || user.email.split('@')[0],
-      role:  'spectator',
-      createdAt: serverTimestamp()
-    });
-  }
+  const ref=doc(db,'users',user.uid); const snap=await getDoc(ref);
+  if(!snap.exists()) await setDoc(ref,{email:user.email,name:user.displayName||user.email.split('@')[0],role:'spectator',createdAt:serverTimestamp()});
 }
 
 onAuthStateChanged(auth, async (user)=>{
-  // Si on est en mode Live anonyme (enterLiveMode déjà appelé), on ignore
-  if(USER_ROLE === 'spectator' && !user) return;
+  if(USER_ROLE==='spectator'&&!user) return;
   if(user){
-    CURRENT_USER = user;
-    await ensureUserDoc(user);
-    USER_ROLE = await getUserRole(user.uid);
-    // Spectateur : bloquer si le live n'est pas ouvert
-    if(USER_ROLE === 'spectator'){
-      try {
-        const snap = await getDoc(doc(db,'interclub','current'));
-        ST.liveOpen = snap.exists() ? snap.data().liveOpen === true : false;
-      } catch(e){ ST.liveOpen = false; }
-      if(!ST.liveOpen){
-        await signOut(auth);
-        CURRENT_USER = null; USER_ROLE = null;
-        showLogin();
-        showAuthMsg('⏰ Le live n\'est pas encore ouvert. Revenez un peu plus tard !', 'red');
-        return;
-      }
+    CURRENT_USER=user; await ensureUserDoc(user); USER_ROLE=await getUserRole(user.uid);
+    if(USER_ROLE==='spectator'){
+      try{ const snap=await getDoc(doc(db,'interclub','current')); ST.liveOpen=snap.exists()?snap.data().liveOpen===true:false; }catch(e){ ST.liveOpen=false; }
+      if(!ST.liveOpen){ await signOut(auth); CURRENT_USER=null; USER_ROLE=null; showLogin(); showAuthMsg('⏰ Le live n\'est pas encore ouvert.','red'); return; }
     }
-    showApp();
-    subscribeToTournament();
-    subscribeToResults();
+    showApp(); subscribeToTournament(); subscribeToResults();
   } else {
-    CURRENT_USER = null;
-    USER_ROLE    = null;
-    unsubAll();
-    // Charger liveOpen depuis Firestore avant d'afficher l'écran de connexion
-    try {
-      const snap = await getDoc(doc(db,'interclub','current'));
-      if(snap.exists()) ST.liveOpen = snap.data().liveOpen === true;
-    } catch(e){ /* réseau absent : live considéré fermé par défaut */ }
+    CURRENT_USER=null; USER_ROLE=null; unsubAll();
+    try{ const snap=await getDoc(doc(db,'interclub','current')); if(snap.exists()) ST.liveOpen=snap.data().liveOpen===true; }catch(e){}
     showLogin();
   }
 });
 
-function unsubAll(){
-  if(unsubTournament){ unsubTournament(); unsubTournament=null; }
-  if(unsubResults)   { unsubResults();    unsubResults=null;    }
-}
+function unsubAll(){ if(unsubTournament){unsubTournament();unsubTournament=null;} if(unsubResults){unsubResults();unsubResults=null;} }
 
-// ── Auth actions ─────────────────────────────────────────
 window.loginEmail = async function(){
-  const email = document.getElementById('li_email').value.trim();
-  const pwd   = document.getElementById('li_pwd').value;
-  if(!email||!pwd){ showAuthMsg('Remplissez email et mot de passe.','red'); return; }
-  try { await signInWithEmailAndPassword(auth, email, pwd); }
+  const email=document.getElementById('li_email').value.trim();
+  const pwd=document.getElementById('li_pwd').value;
+  if(!email||!pwd){showAuthMsg('Remplissez email et mot de passe.','red');return;}
+  try{ await signInWithEmailAndPassword(auth,email,pwd); }
   catch(e){ showAuthMsg(authErrMsg(e.code),'red'); }
 };
 window.loginGoogle = async function(){
-  try { await signInWithPopup(auth, gProvider); }
+  try{ await signInWithPopup(auth,gProvider); }
   catch(e){ showAuthMsg(authErrMsg(e.code),'red'); }
 };
-
 window.logout = async function(){
-  clearInterval(ST.timerIv); unsubAll();
-  USER_ROLE = null; CURRENT_USER = null;
-  if(auth.currentUser) await signOut(auth);
-  else showLogin(); // mode live anonyme : retour direct à l'écran connexion
+  clearInterval(ST.timerIv); unsubAll(); USER_ROLE=null; CURRENT_USER=null;
+  if(auth.currentUser) await signOut(auth); else showLogin();
 };
 
-// ── Mode Live sans compte avec redirection ────────────────
 window.enterLiveModeAndGo = function(target){
-  // Le règlement est toujours accessible, mais Live/Classement nécessitent liveOpen
-  if(target !== 'R' && !ST.liveOpen){
-    const overlay = document.getElementById('liveClosedOverlay');
-    if(overlay) overlay.style.display='flex';
-    return;
-  }
-  CURRENT_USER = null;
-  USER_ROLE    = 'spectator';
-  // Si on a passé la garde ci-dessus, le live est forcément ouvert
-  // On le confirme immédiatement (le snapshot Firestore le reconfirmera)
-  if(target !== 'R') ST.liveOpen = true;
+  if(target!=='R'&&!ST.liveOpen){ document.getElementById('liveClosedOverlay').style.display='flex'; return; }
+  CURRENT_USER=null; USER_ROLE='spectator';
+  if(target!=='R') ST.liveOpen=true;
   document.getElementById('loginScreen').style.display='none';
   document.getElementById('appScreen').style.display='block';
-  applyRoleUI();
-  subscribeToTournamentPublic();
-  subscribeToResultsPublic();
-  if(target === 'R'){
-    setTimeout(()=>{ if(typeof toggleRules==='function') toggleRules(); }, 100);
-  } else if(target === 5){
-    setTimeout(()=>{ goTo(5); }, 100);
-  } else {
-    setTimeout(()=>{ goTo(4); }, 100);
-  }
+  applyRoleUI(); subscribeToTournamentPublic(); subscribeToResultsPublic();
+  if(target==='R'){ setTimeout(()=>{ if(typeof toggleRules==='function')toggleRules(); },100); }
+  else if(target===5){ setTimeout(()=>{ goTo(5); },100); }
+  else{ setTimeout(()=>{ goTo(4); },100); }
 };
 
-// ── Mode Live sans compte (spectateur anonyme) ────────────
-window.enterLiveMode = function(){
-  CURRENT_USER = null;
-  USER_ROLE    = 'spectator';
+window.openReglement = function(){
+  CURRENT_USER=null; USER_ROLE='spectator';
   document.getElementById('loginScreen').style.display='none';
   document.getElementById('appScreen').style.display='block';
   applyRoleUI();
-  // Abonnements en lecture seule (pas besoin d'auth pour lire si règles ouvertes en lecture)
-  subscribeToTournamentPublic();
-  subscribeToResultsPublic();
+  document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
+  const pageR=document.getElementById('pageR');
+  if(pageR){pageR.classList.add('active');ST.rulesOpen=true;}
+  const ruleBtn=document.getElementById('ruleBtn');
+  if(ruleBtn) ruleBtn.textContent='× Fermer';
+  window.scrollTo(0,0);
 };
+
 function subscribeToTournamentPublic(){
-  unsubTournament = onSnapshot(doc(db,'interclub','current'), (snap)=>{
-    if(!snap.exists()) return;
-    const data=snap.data();
-    if(data.cfg)      ST.cfg      = data.cfg;
-    if(data.teams){ST.teams=data.teams;ST.players=data.teams;}
-    else if(data.players){ST.teams=data.players;ST.players=data.players;}
-    if(data.schedule) ST.schedule = data.schedule;
-    if(data.activeRound!=null) ST.activeRound = data.activeRound;
-    // Statut live (contrôlé par l'admin)
-    ST.liveOpen = data.liveOpen === true;
+  unsubTournament=onSnapshot(doc(db,'interclub','current'),(snap)=>{
+    if(!snap.exists())return; const data=snap.data();
+    if(data.cfg) ST.cfg=data.cfg;
+    if(data.teams){ST.teams=data.teams;}
+    if(data.schedule) ST.schedule=data.schedule;
+    if(data.activeRound!=null) ST.activeRound=data.activeRound;
+    ST.liveOpen=data.liveOpen===true;
     if(ST.page===4) renderTournament();
     if(ST.page===5) renderFinal();
-    if(ST.schedule.length>0 && ST.page<4) goTo(4);
+    if(ST.schedule.length>0&&ST.page<4) goTo(4);
   });
 }
-function normalizeResult(data){
-  return { ga: data.ga==null?'':data.ga, gb: data.gb==null?'':data.gb };
-}
+function normalizeResult(data){ return {ga:data.ga==null?'':data.ga,gb:data.gb==null?'':data.gb}; }
 function subscribeToResultsPublic(){
-  unsubResults = onSnapshot(collection(db,'interclub_results'), (snap)=>{
-    snap.docChanges().forEach(change=>{
-      if(change.type==='removed') delete ST.results[change.doc.id];
-      else ST.results[change.doc.id]=normalizeResult(change.doc.data());
-    });
-    if(ST.page===4){ renderMatches(); renderMiniStandings(); checkDone(); }
+  unsubResults=onSnapshot(collection(db,'interclub_results'),(snap)=>{
+    snap.docChanges().forEach(change=>{ if(change.type==='removed') delete ST.results[change.doc.id]; else ST.results[change.doc.id]=normalizeResult(change.doc.data()); });
+    if(ST.page===4){renderMatches();renderMiniStandings();checkDone();}
     if(ST.page===5) renderFinal();
   });
 }
 
-// ── Création de compte par l'admin (depuis page Config) ───
 window.adminCreateUser = async function(){
-  if(!isAdmin()){ alert('Admin uniquement.'); return; }
-  const name  = document.getElementById('newU_name').value.trim();
-  const email = document.getElementById('newU_email').value.trim();
-  const pwd   = document.getElementById('newU_pwd').value;
-  const role  = document.getElementById('newU_role').value;
-  const msg   = document.getElementById('newUserMsg');
-  if(!name||!email||!pwd){ msg.textContent='Tous les champs sont requis.'; msg.style.color='var(--red)'; return; }
-  if(pwd.length<6){ msg.textContent='Mot de passe : 6 car. minimum.'; msg.style.color='var(--red)'; return; }
-  try {
-    // Créer l'utilisateur via la REST API Firebase Auth (sans déconnecter l'admin)
-    const res = await fetch(
-      `https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=AIzaSyAa-It1GI_9KTAvQKzkLWNANv91QnZar04`,
-      { method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ email, password:pwd, returnSecureToken:true }) }
-    );
-    const data = await res.json();
-    if(data.error){ throw new Error(data.error.message); }
-    const uid = data.localId;
-    // Créer le doc Firestore
-    await setDoc(doc(db,'users',uid),{
-      email, name, role, createdAt: serverTimestamp(), createdBy: CURRENT_USER.uid
-    });
-    await auditLog('admin_create_user',{ uid, email, name, role });
-    msg.textContent=`✅ Compte créé : ${name} (${role})`; msg.style.color='var(--grn)';
-    document.getElementById('newU_name').value='';
-    document.getElementById('newU_email').value='';
-    document.getElementById('newU_pwd').value='';
-    setTimeout(()=>{ msg.textContent=''; },4000);
-  } catch(e){
-    msg.textContent='❌ '+e.message; msg.style.color='var(--red)';
-  }
+  if(!isAdmin()){alert('Admin uniquement.');return;}
+  const name=document.getElementById('newU_name').value.trim();
+  const email=document.getElementById('newU_email').value.trim();
+  const pwd=document.getElementById('newU_pwd').value;
+  const role=document.getElementById('newU_role').value;
+  const msg=document.getElementById('newUserMsg');
+  if(!name||!email||!pwd){msg.textContent='Tous les champs sont requis.';msg.style.color='var(--red)';return;}
+  if(pwd.length<6){msg.textContent='Mot de passe : 6 car. minimum.';msg.style.color='var(--red)';return;}
+  try{
+    const res=await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=AIzaSyAa-It1GI_9KTAvQKzkLWNANv91QnZar04`,
+      {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email,password:pwd,returnSecureToken:true})});
+    const data=await res.json();
+    if(data.error){throw new Error(data.error.message);}
+    await setDoc(doc(db,'users',data.localId),{email,name,role,createdAt:serverTimestamp(),createdBy:CURRENT_USER.uid});
+    await auditLog('admin_create_user',{uid:data.localId,email,name,role});
+    msg.textContent=`✅ Compte créé : ${name} (${role})`;msg.style.color='var(--grn)';
+    ['newU_name','newU_email','newU_pwd'].forEach(id=>{document.getElementById(id).value='';});
+    setTimeout(()=>{msg.textContent='';},4000);
+  }catch(e){msg.textContent='❌ '+e.message;msg.style.color='var(--red)';}
 };
+
 function authErrMsg(code){
-  const map={
-    'auth/wrong-password':'Mot de passe incorrect.',
-    'auth/user-not-found':'Aucun compte avec cet email.',
-    'auth/email-already-in-use':'Cet email est déjà utilisé.',
-    'auth/invalid-email':'Email invalide.',
-    'auth/weak-password':'Mot de passe trop faible (6 car. min).',
-    'auth/popup-closed-by-user':'Connexion Google annulée.',
-    'auth/too-many-requests':'Trop de tentatives. Réessayez plus tard.',
-    'auth/invalid-credential':'Email ou mot de passe incorrect.'
-  };
+  const map={'auth/wrong-password':'Mot de passe incorrect.','auth/user-not-found':'Aucun compte avec cet email.',
+    'auth/email-already-in-use':'Cet email est déjà utilisé.','auth/invalid-email':'Email invalide.',
+    'auth/weak-password':'Mot de passe trop faible (6 car. min).','auth/popup-closed-by-user':'Connexion Google annulée.',
+    'auth/too-many-requests':'Trop de tentatives. Réessayez plus tard.','auth/invalid-credential':'Email ou mot de passe incorrect.'};
   return map[code]||'Erreur : '+code;
 }
 function showAuthMsg(msg,color){
   const el=document.getElementById('authMsg');
-  el.textContent=msg;
-  el.style.color=color==='red'?'var(--red)':'var(--grn)';
+  el.textContent=msg; el.style.color=color==='red'?'var(--red)':'var(--grn)';
 }
 
 // ══════════════════════════════════════════════════════════
@@ -298,382 +218,222 @@ function roleBadge(role){
   return map[role]||role;
 }
 function applyRoleUI(){
-  const name = CURRENT_USER
-    ? (CURRENT_USER.displayName||CURRENT_USER.email||'?')
-    : '📺 Mode Live';
-  document.getElementById('hdrUserName').textContent = name + ' · ' + roleBadge(USER_ROLE);
-  const lBtn = document.getElementById('logoutBtn');
-  if(lBtn) lBtn.textContent = CURRENT_USER ? 'Déconnexion' : 'Quitter';
-
-  const isSpec = USER_ROLE === 'spectator';
-
-  // Barre nav spectateur
-  const specNav = document.getElementById('specNav');
-  if(specNav) specNav.classList.toggle('visible', isSpec);
-
-  // Barre steps (admin/scorer uniquement)
-  const stepNav = document.getElementById('stepNav');
-  if(stepNav) stepNav.style.display = isSpec ? 'none' : '';
-
-  // Éléments admin-only
-  document.querySelectorAll('[data-role="admin"]').forEach(el=>{
-    el.style.display = isAdmin() ? '' : 'none';
-  });
-  // Éléments scorer+admin
-  document.querySelectorAll('[data-role="scorer"]').forEach(el=>{
-    el.style.display = isScorer() ? '' : 'none';
-  });
-  // Info spectateur sur page 4
-  const si = document.getElementById('spectatorInfo');
-  if(si) si.style.display = isSpec ? '' : 'none';
-  updateStepVisibility();
-  updateFwdBtn();
-  updateLiveToggleBtn();
+  const name=CURRENT_USER?(CURRENT_USER.displayName||CURRENT_USER.email||'?'):'📺 Mode Live';
+  document.getElementById('hdrUserName').textContent=name+' · '+roleBadge(USER_ROLE);
+  const lBtn=document.getElementById('logoutBtn');
+  if(lBtn) lBtn.textContent=CURRENT_USER?'Déconnexion':'Quitter';
+  const isSpec=USER_ROLE==='spectator';
+  const specNav=document.getElementById('specNav');
+  if(specNav) specNav.classList.toggle('visible',isSpec);
+  const stepNav=document.getElementById('stepNav');
+  if(stepNav) stepNav.style.display=isSpec?'none':'';
+  document.querySelectorAll('[data-role="admin"]').forEach(el=>{el.style.display=isAdmin()?'':'none';});
+  document.querySelectorAll('[data-role="scorer"]').forEach(el=>{el.style.display=isScorer()?'':'none';});
+  const si=document.getElementById('spectatorInfo');
+  if(si) si.style.display=isSpec?'':'none';
+  updateStepVisibility(); updateFwdBtn(); updateLiveToggleBtn();
 }
 function updateStepVisibility(){
-  // Admin : étapes 1–5 | Scorer/Spectateur : 4–5 seulement
-  [1,2,3].forEach(n=>{
-    const el=document.querySelector(`.step[data-s="${n}"]`);
-    if(el) el.style.display = isAdmin() ? '' : 'none';
-  });
+  [1,2,3].forEach(n=>{const el=document.querySelector(`.step[data-s="${n}"]`);if(el)el.style.display=isAdmin()?'':'none';});
 }
 
-// ── Panneau admin ─────────────────────────────────────────
 window.toggleAdminPanel = function(){
   const el=document.getElementById('adminPanel');
-  el.style.display = el.style.display==='none' ? 'block' : 'none';
+  el.style.display=el.style.display==='none'?'block':'none';
 };
 
-// ── Charger la liste des utilisateurs ────────────────────
 window.loadUserList = async function(){
-  if(!isAdmin()) return;
-  const listEl = document.getElementById('userListBody');
-  if(!listEl) return;
-  listEl.innerHTML = '<tr><td colspan="4" style="color:var(--muted);font-size:13px;padding:10px 0">Chargement…</td></tr>';
-  try {
-    const { getDocs, collection: col2 } = await import('https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js');
-    const snap = await getDocs(col2(db,'users'));
-    if(snap.empty){ listEl.innerHTML='<tr><td colspan="4" style="color:var(--muted);font-size:13px;padding:10px 0">Aucun utilisateur enregistré.</td></tr>'; return; }
+  if(!isAdmin())return;
+  const listEl=document.getElementById('userListBody');
+  if(!listEl)return;
+  listEl.innerHTML='<tr><td colspan="4" style="color:var(--muted);font-size:13px;padding:10px 0">Chargement…</td></tr>';
+  try{
+    const {getDocs,collection:col2}=await import('https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js');
+    const snap=await getDocs(col2(db,'users'));
+    if(snap.empty){listEl.innerHTML='<tr><td colspan="4" style="color:var(--muted);font-size:13px;padding:10px 0">Aucun utilisateur.</td></tr>';return;}
     listEl.innerHTML='';
     snap.forEach(d=>{
-      const u=d.data(); const uid=d.id;
-      const isMe = CURRENT_USER && uid===CURRENT_USER.uid;
+      const u=d.data(),uid=d.id,isMe=CURRENT_USER&&uid===CURRENT_USER.uid;
       const roleIcon={admin:'👑',scorer:'✏️',spectator:'👁'}[u.role]||'?';
       const tr=document.createElement('tr');
       tr.style.cssText='border-bottom:1px solid rgba(255,255,255,.08);font-size:13px';
-      tr.innerHTML=`
-        <td style="padding:8px 6px;color:#fff;font-weight:600">${u.name||'—'}</td>
+      tr.innerHTML=`<td style="padding:8px 6px;color:#fff;font-weight:600">${u.name||'—'}</td>
         <td style="padding:8px 6px;color:rgba(255,255,255,.55);font-size:12px">${u.email||'—'}</td>
         <td style="padding:8px 6px">${roleIcon} <span style="color:rgba(255,255,255,.7)">${u.role||'—'}</span></td>
-        <td style="padding:8px 6px">
-          ${isMe ? '<span style="color:rgba(255,255,255,.3);font-size:11px">— vous —</span>' :
-            `<button onclick="adminDeleteUser('${uid}','${(u.name||u.email||uid).replace(/'/g,"\\'")}')"
-              style="background:#8a1810;border:1px solid #c04030;color:#fff;border-radius:5px;padding:4px 10px;font-size:12px;cursor:pointer;font-family:\'Exo 2\',sans-serif;font-weight:600;transition:all .15s"
-              onmouseover="this.style.background=\'#c02818\'" onmouseout="this.style.background=\'#8a1810\'">
-              🗑 Supprimer
-            </button>`
-          }
-        </td>`;
+        <td style="padding:8px 6px">${isMe?'<span style="color:rgba(255,255,255,.3);font-size:11px">— vous —</span>':
+          `<button onclick="adminDeleteUser('${uid}','${(u.name||u.email||uid).replace(/'/g,"\\'")}') "
+            style="background:#8a1810;border:1px solid #c04030;color:#fff;border-radius:5px;padding:4px 10px;font-size:12px;cursor:pointer">🗑</button>`}</td>`;
       listEl.appendChild(tr);
     });
-  } catch(e){
-    listEl.innerHTML=`<tr><td colspan="4" style="color:var(--red);font-size:13px;padding:10px 0">Erreur : ${e.message}</td></tr>`;
-  }
+  }catch(e){listEl.innerHTML=`<tr><td colspan="4" style="color:var(--red)">${e.message}</td></tr>`;}
 };
 
-window.adminDeleteUser = async function(uid, name){
-  if(!isAdmin()){ alert('Admin uniquement.'); return; }
-  if(!confirm(`Supprimer l'utilisateur "${name}" ?\nCette action est irréversible.`)) return;
-  try {
+window.adminDeleteUser = async function(uid,name){
+  if(!isAdmin())return;
+  if(!confirm(`Supprimer "${name}" ?`))return;
+  try{
     await deleteDoc(doc(db,'users',uid));
-    await auditLog('admin_delete_user',{ uid, name });
-    // Supprimer aussi via la REST API Firebase Auth (nécessite un token admin — si indispo, on supprime juste Firestore)
-    const msg = document.getElementById('userListMsg');
-    if(msg){ msg.textContent=`✅ Utilisateur "${name}" supprimé (Firestore). Pensez à le retirer de Firebase Auth si besoin.`; msg.style.color='var(--grn)'; setTimeout(()=>{ msg.textContent=''; },5000); }
+    await auditLog('admin_delete_user',{uid,name});
     window.loadUserList();
-  } catch(e){
-    alert('Erreur suppression : '+e.message);
-  }
+  }catch(e){alert('Erreur : '+e.message);}
 };
 
-// ── Attribuer un rôle ─────────────────────────────────────
 window.setUserRole = async function(){
-  if(!isAdmin()){ alert('Admin uniquement.'); return; }
-  const uid  = document.getElementById('adminUidInput').value.trim();
-  const role = document.getElementById('adminRoleSelect').value;
-  if(!uid){ alert("Entrez l'UID de l'utilisateur."); return; }
-  try {
-    await setDoc(doc(db,'users',uid),{ role },{ merge:true });
-    await auditLog('set_role',{ targetUid:uid, role });
+  if(!isAdmin())return;
+  const uid=document.getElementById('adminUidInput').value.trim();
+  const role=document.getElementById('adminRoleSelect').value;
+  if(!uid){alert("Entrez l'UID.");return;}
+  try{
+    await setDoc(doc(db,'users',uid),{role},{merge:true});
+    await auditLog('set_role',{targetUid:uid,role});
     const msg=document.getElementById('adminRoleMsg');
-    msg.textContent='✅ Rôle mis à jour !'; msg.style.color='var(--grn)';
-    setTimeout(()=>{ msg.textContent=''; },3000);
-  } catch(e){
-    const msg=document.getElementById('adminRoleMsg');
-    msg.textContent='❌ Erreur : '+e.message; msg.style.color='var(--red)';
-  }
+    msg.textContent='✅ Rôle mis à jour !';msg.style.color='var(--grn)';
+    setTimeout(()=>{msg.textContent='';},3000);
+  }catch(e){const msg=document.getElementById('adminRoleMsg');msg.textContent='❌ '+e.message;msg.style.color='var(--red)';}
 };
 
 // ══════════════════════════════════════════════════════════
-// FIRESTORE — ABONNEMENTS TEMPS RÉEL
+// FIRESTORE
 // ══════════════════════════════════════════════════════════
 function subscribeToTournament(){
-  unsubTournament = onSnapshot(doc(db,'interclub','current'), (snap)=>{
-    if(!snap.exists()) return;
-    const data=snap.data();
-    if(data.cfg)      ST.cfg      = data.cfg;
-    if(data.teams){ST.teams=data.teams;ST.players=data.teams;}
-    else if(data.players){ST.teams=data.players;ST.players=data.players;}
-    if(data.schedule) ST.schedule = data.schedule;
-    if(data.activeRound!=null) ST.activeRound = data.activeRound;
-    ST.liveOpen = data.liveOpen === true;
+  unsubTournament=onSnapshot(doc(db,'interclub','current'),(snap)=>{
+    if(!snap.exists())return; const data=snap.data();
+    if(data.cfg) ST.cfg=data.cfg;
+    if(data.teams) ST.teams=data.teams;
+    if(data.schedule) ST.schedule=data.schedule;
+    if(data.activeRound!=null) ST.activeRound=data.activeRound;
+    ST.liveOpen=data.liveOpen===true;
     updateLiveToggleBtn();
     if(ST.page===3) renderGen();
     if(ST.page===4) renderTournament();
     if(ST.page===5) renderFinal();
-    if(isAdmin() && ST.page===1) syncCfgForm();
-    if(isAdmin() && ST.page===2) renderPlayers();
-    // Scorer : si le tournoi est actif et sur une page setup, rediriger vers p4
-    if(!isAdmin() && ST.schedule.length>0 && ST.page<4) goTo(4);
+    if(isAdmin()&&ST.page===1) syncCfgForm();
+    if(isAdmin()&&ST.page===2) renderPlayers();
+    if(!isAdmin()&&ST.schedule.length>0&&ST.page<4) goTo(4);
   });
 }
 function subscribeToResults(){
-  unsubResults = onSnapshot(collection(db,'interclub_results'), (snap)=>{
-    snap.docChanges().forEach(change=>{
-      if(change.type==='removed') delete ST.results[change.doc.id];
-      else ST.results[change.doc.id]=normalizeResult(change.doc.data());
-    });
-    if(ST.page===4){ renderMatches(); renderMiniStandings(); checkDone(); }
+  unsubResults=onSnapshot(collection(db,'interclub_results'),(snap)=>{
+    snap.docChanges().forEach(change=>{ if(change.type==='removed') delete ST.results[change.doc.id]; else ST.results[change.doc.id]=normalizeResult(change.doc.data()); });
+    if(ST.page===4){renderMatches();renderMiniStandings();checkDone();}
     if(ST.page===5) renderFinal();
   });
 }
-
-// ══════════════════════════════════════════════════════════
-// FIRESTORE — ÉCRITURES
-// ══════════════════════════════════════════════════════════
 async function saveTournament(fields){
-  if(!isAdmin()){ alert("Action réservée à l'admin."); return; }
-  try {
-    await setDoc(doc(db,'interclub','current'),{
-      ...fields, updatedAt: serverTimestamp()
-    },{ merge:true });
-  } catch(e){ alert('Erreur sauvegarde : '+e.message); }
+  if(!isAdmin()){alert("Admin uniquement.");return;}
+  try{ await setDoc(doc(db,'interclub','current'),{...fields,updatedAt:serverTimestamp()},{merge:true}); }
+  catch(e){alert('Erreur sauvegarde : '+e.message);}
 }
-
-async function saveResult(key, ga, gb){
-  if(!isScorer()){ alert('Action réservée aux scorers et admins.'); return; }
-  try {
-    if(ga===''&&gb===''){
-      // Les deux champs vidés → supprimer le document (annulation complète du score)
-      await deleteDoc(doc(db,'interclub_results',key));
-      await auditLog('delete_result',{ key });
-    } else {
-      await setDoc(doc(db,'interclub_results',key),{
-        ga: ga===''?null:ga,
-        gb: gb===''?null:gb,
-        savedAt: serverTimestamp(),
-        savedBy: CURRENT_USER.uid
-      });
-      await auditLog('save_result',{ key, ga, gb });
-    }
-  } catch(e){ alert('Erreur sauvegarde score : '+e.message); }
+async function saveResult(key,ga,gb){
+  if(!isScorer()){alert('Réservé aux scorers et admins.');return;}
+  try{
+    if(ga===''&&gb===''){ await deleteDoc(doc(db,'interclub_results',key)); await auditLog('delete_result',{key}); }
+    else{ await setDoc(doc(db,'interclub_results',key),{ga:ga===''?null:ga,gb:gb===''?null:gb,savedAt:serverTimestamp(),savedBy:CURRENT_USER.uid}); await auditLog('save_result',{key,ga,gb}); }
+  }catch(e){alert('Erreur score : '+e.message);}
 }
-
-async function auditLog(action, details){
-  try {
-    await addDoc(collection(db,'auditLog'),{
-      action, details,
-      userId:   CURRENT_USER?.uid,
-      userName: CURRENT_USER?.displayName||CURRENT_USER?.email,
-      timestamp: serverTimestamp()
-    });
-  } catch(e){}
-}
-
-// ══════════════════════════════════════════════════════════
-// MODIFICATION NOM JOUEUR (scorer + admin)
-// ══════════════════════════════════════════════════════════
-window.editPlayerName = async function(idx){
-  if(!isScorer()) return;
-  const p = ST.players[idx];
-  if(!p) return;
-  // Trouver le span du nom dans le DOM et le remplacer par un input inline
-  const spans = document.querySelectorAll(`[data-playeridx="${idx}"]`);
-  const target = spans[0];
-  if(!target) {
-    // Fallback si pas de data-playeridx trouvé
-    const newName = prompt('Nouveau nom :', p.name);
-    if(!newName || !newName.trim() || newName.trim()===p.name) return;
-    await _savePlayerName(idx, newName.trim());
-    return;
-  }
-  const oldName = p.name;
-  const inp = document.createElement('input');
-  inp.type = 'text';
-  inp.value = oldName;
-  inp.className = 'name-edit-inp';
-  inp.maxLength = 40;
-  inp.style.cssText = 'font-size:inherit;font-weight:inherit;font-family:inherit;background:var(--s1);border:2px solid var(--blu);border-radius:6px;color:var(--ink);padding:2px 6px;width:140px;outline:none';
-  target.replaceWith(inp);
-  inp.focus(); inp.select();
-  const commit = async () => {
-    const newName = inp.value.trim();
-    // Restaurer le span dans tous les cas
-    const span = document.createElement('span');
-    span.dataset.playeridx = idx;
-    span.textContent = newName || oldName;
-    inp.replaceWith(span);
-    if(newName && newName !== oldName) await _savePlayerName(idx, newName);
-  };
-  inp.addEventListener('blur', commit);
-  inp.addEventListener('keydown', e => {
-    if(e.key === 'Enter'){ e.preventDefault(); inp.blur(); }
-    if(e.key === 'Escape'){ inp.value = oldName; inp.blur(); }
-  });
-};
-async function _savePlayerName(idx, newName){
-  ST.players[idx].name = newName;
-  try {
-    await setDoc(doc(db,'interclub','current'),{
-      players: ST.players, updatedAt: serverTimestamp()
-    },{ merge:true });
-    await auditLog('edit_player_name',{ idx, newName });
-  } catch(e){ alert('Erreur : '+e.message); }
-  renderPlayers();
-  if(ST.page===4) renderMatches();
+async function auditLog(action,details){
+  try{ await addDoc(collection(db,'auditLog'),{action,details,userId:CURRENT_USER?.uid,userName:CURRENT_USER?.displayName||CURRENT_USER?.email,timestamp:serverTimestamp()}); }catch(e){}
 }
 
 // ══════════════════════════════════════════════════════════
 // NAVIGATION
 // ══════════════════════════════════════════════════════════
-// Accès live depuis le règlement ou la nav spec — bloqué si live fermé
 window.spectatorGoLive = function(n){
-  if(isLiveBlocked()){
-    document.getElementById('liveClosedOverlay').style.display='flex';
-    return;
-  }
+  if(isLiveBlocked()){document.getElementById('liveClosedOverlay').style.display='flex';return;}
   goTo(n);
 };
-
 window.goTo = function(n){
-  // Spectateur : bloquer Live (4) et Classement (5) si live fermé
-  if(isLiveBlocked() && (n===4||n===5)){
-    document.getElementById('liveClosedOverlay').style.display='flex';
-    return;
-  }
-  // Pages 1-3 : admin uniquement
-  if(n<=3 && !isAdmin()){
-    if(ST.schedule.length>0){ n=4; }
-    else {
-      // spectateur sans tournoi actif : afficher un message doux
+  if(isLiveBlocked()&&(n===4||n===5)){document.getElementById('liveClosedOverlay').style.display='flex';return;}
+  if(n<=3&&!isAdmin()){
+    if(ST.schedule.length>0){n=4;}
+    else{
       const si=document.getElementById('spectatorInfo');
-      if(si){ si.style.display=''; si.innerHTML='👁 Mode <strong>Spectateur</strong> — aucun tournoi actif pour l\'instant. Revenez plus tard !'; }
+      if(si){si.style.display='';si.innerHTML='👁 Mode <strong>Spectateur</strong> — aucun tournoi actif pour l\'instant.';}
       document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
       document.getElementById('page4').classList.add('active');
-      ST.page=4; updateSteps(4); window.scrollTo(0,0);
-      return;
+      ST.page=4;updateSteps(4);window.scrollTo(0,0);return;
     }
   }
-  if(n===3 && ST.schedule.length===0){
-    // Pas de planning en mémoire ni en Firestore : générer une première fois
-    if(!buildSchedule()) return;
-    // Sauvegarder immédiatement pour qu'un retour arrière retrouve le même tirage
-    saveTournament({ schedule: ST.schedule, activeRound: 0 });
-  }
+  if(n===3&&ST.schedule.length===0){ if(!buildSchedule())return; saveTournament({schedule:ST.schedule,activeRound:0}); }
   document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
   document.getElementById('page'+n).classList.add('active');
   ST.page=n;
-  // Bouton retour : uniquement pour admin (scorers/spectateurs n'ont pas de workflow linéaire)
   document.getElementById('backBtn').style.display=(isAdmin()&&n>1)?'':'none';
-  updateFwdBtn();
-  updateSteps(n);
-  window.scrollTo(0,0);
+  updateFwdBtn(); updateSteps(n); window.scrollTo(0,0);
   if(n===3) renderGen();
-  if(n===4){ renderTournament(); const si=document.getElementById('spectatorInfo'); if(si) si.style.display=USER_ROLE==='spectator'?'':'none'; }
+  if(n===4){renderTournament();const si=document.getElementById('spectatorInfo');if(si)si.style.display=USER_ROLE==='spectator'?'':'none';}
   if(n===5) renderFinal();
-  // Mettre à jour la nav spectateur
   updateSpectatorNav(n);
 };
-window.goBack = function(){
-  if(ST.rulesOpen){toggleRules();return;}
-  if(isAdmin() && ST.page>1) goTo(ST.page-1);
-};
-
-// ─── Navigation vers la page suivante (si déjà générée) ───
+window.goBack = function(){ if(ST.rulesOpen){toggleRules();return;} if(isAdmin()&&ST.page>1)goTo(ST.page-1); };
 function canGoFwd(){
-  if(!isAdmin()) return false;
-  if(ST.rulesOpen) return false;
-  const n = ST.cfg && ST.cfg.n ? ST.cfg.n : 0;
-  if(ST.page===1) return n >= 4;
-  if(ST.page===2) return ST.teams.length >= n;
-  if(ST.page===3) return ST.schedule.length > 0;
-  if(ST.page===4) return true;
+  if(!isAdmin()||ST.rulesOpen)return false;
+  if(ST.page===1)return (ST.cfg.n||0)>=4;
+  if(ST.page===2)return ST.teams.length>=(ST.cfg.n||0);
+  if(ST.page===3)return ST.schedule.length>0;
+  if(ST.page===4)return true;
   return false;
 }
 function updateFwdBtn(){
-  const show = canGoFwd();
-  const btn = document.getElementById('fwdBtn');
-  if(btn) btn.style.display = show ? '' : 'none';
-  if(typeof syncDrawerButtons === 'function') syncDrawerButtons();
+  const btn=document.getElementById('fwdBtn');
+  if(btn) btn.style.display=canGoFwd()?'':'none';
+  if(typeof syncDrawerButtons==='function') syncDrawerButtons();
 }
 window.goFwd = function(){
-  if(!canGoFwd()) return;
-  if(ST.page===1) goTo(2);
-  else if(ST.page===2) goTo(3);
-  else if(ST.page===3) goTo(4);
-  else if(ST.page===4) goTo(5);
+  if(!canGoFwd())return;
+  if(ST.page===1)goTo(2); else if(ST.page===2)goTo(3); else if(ST.page===3)goTo(4); else if(ST.page===4)goTo(5);
 };
 function updateSpectatorNav(n){
-  // Mettre en surbrillance le bouton actif dans la nav spectateur
   document.querySelectorAll('.spec-nav-btn').forEach(btn=>{
     const target=+btn.dataset.target;
-    btn.classList.toggle('spec-nav-active', target===n);
+    btn.classList.toggle('spec-nav-active',target===n);
   });
 }
 function updateSteps(n){
   document.querySelectorAll('.step').forEach(s=>{
-    const sn=+s.dataset.s; s.classList.remove('active','done');
-    if(sn===n) s.classList.add('active'); else if(sn<n) s.classList.add('done');
+    const sn=+s.dataset.s;s.classList.remove('active','done');
+    if(sn===n)s.classList.add('active');else if(sn<n)s.classList.add('done');
     s.querySelector('.step-n').textContent=sn<n?'✓':sn;
   });
   for(let i=1;i<=4;i++) document.getElementById('sl'+i).classList.toggle('done',i<n);
 }
 window.toggleRules = function(){
   ST.rulesOpen=!ST.rulesOpen;
-  // Si on ferme le règlement et que le live est fermé pour un spectateur → retour écran connexion
-  if(!ST.rulesOpen && isLiveBlocked()){
+  if(!ST.rulesOpen&&isLiveBlocked()){
     document.getElementById('appScreen').style.display='none';
     document.getElementById('loginScreen').style.display='block';
-    CURRENT_USER=null; USER_ROLE=null;
-    return;
+    CURRENT_USER=null;USER_ROLE=null;return;
   }
   document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
-  const backPage = ST.rulesOpen ? 'pageR' : 'page'+(isAdmin()?ST.page:4);
+  const backPage=ST.rulesOpen?'pageR':'page'+(isAdmin()?ST.page:4);
   document.getElementById(backPage).classList.add('active');
   document.getElementById('ruleBtn').textContent=ST.rulesOpen?'× Fermer':'📋 Règlement';
   document.getElementById('backBtn').style.display=(ST.rulesOpen||ST.page>1)&&isAdmin()?'':'none';
   updateFwdBtn();
-  if(ST.rulesOpen) applyRoleUI(); // re-appliquer les rôles pour afficher les boutons admin dans pageR
-  if(!ST.rulesOpen) updateSpectatorNav(isAdmin()?ST.page:4);
+  if(ST.rulesOpen)applyRoleUI();
+  if(!ST.rulesOpen)updateSpectatorNav(isAdmin()?ST.page:4);
 };
+window.goToLive = function(){ if(ST.schedule.length>0)goTo(4); else alert("Aucun tournoi actif."); };
 
 // ══════════════════════════════════════════════════════════
-// PAGE 1 — CONFIG (admin uniquement)
+// PAGE 1 — CONFIG
 // ══════════════════════════════════════════════════════════
 function getCfg(){
-  const wavesEl=document.getElementById('cfg_waves');
-  const hallsEl=document.getElementById('cfg_halls');
-  const t2El=document.getElementById('cfg_t2');
-  const lunchEl=document.getElementById('cfg_lunch');
-  const morningEl=document.getElementById('cfg_morning');
+  const halls=+document.getElementById('cfg_halls').value||1;
+  const w1el=document.getElementById('cfg_waves1');
+  const w2el=document.getElementById('cfg_waves2');
+  const t2el=document.getElementById('cfg_t2');
   const totalR=+document.getElementById('cfg_r').value||7;
+  const morningEl=document.getElementById('cfg_morning');
   const morning=morningEl?Math.max(1,Math.min(totalR-1,+morningEl.value)):Math.ceil(totalR/2);
-  const halls=hallsEl?+hallsEl.value:1;
+  const lunchEl=document.getElementById('cfg_lunch');
   return {
     n:+document.getElementById('cfg_n').value,
-    t:+document.getElementById('cfg_t').value,
-    t2:(halls===2&&t2El)?+t2El.value:0,
     halls:halls,
+    t1:+document.getElementById('cfg_t1').value,
+    t2:(halls===2&&t2el)?+t2el.value:0,
+    waves1:w1el?+w1el.value:2,
+    waves2:(halls===2&&w2el)?+w2el.value:2,
     r:totalR,
     matchesMorning:morning,
     matchesAfternoon:totalR-morning,
@@ -682,292 +442,35 @@ function getCfg(){
     tp:+document.getElementById('cfg_tp').value,
     bal:document.getElementById('cfg_bal').value,
     start:document.getElementById('cfg_start').value||'09:00',
-    waves:wavesEl?+wavesEl.value:0,
     lunchBreak:lunchEl?lunchEl.checked:true,
-    lunchDuration:document.getElementById('cfg_lunchdur')?+document.getElementById('cfg_lunchdur').value:60,
-    lunchStart:document.getElementById('cfg_lunchstart')?document.getElementById('cfg_lunchstart').value:'12:30'
+    lunchDuration:+document.getElementById('cfg_lunchdur').value||60,
+    lunchStart:document.getElementById('cfg_lunchstart').value||'12:30'
   };
 }
 function syncCfgForm(){
   const c=ST.cfg;
-  ['n','t','r','mt','tt','tp'].forEach(k=>{ const el=document.getElementById('cfg_'+k); if(el) el.value=c[k]; });
-  const sv=(id,v)=>{ const el=document.getElementById(id); if(el) el.value=v; };
-  const sc=(id,v)=>{ const el=document.getElementById(id); if(el) el.checked=v; };
-  sv('cfg_bal',c.bal); sv('cfg_start',c.start); sv('cfg_waves',c.waves||0);
-  sv('cfg_halls',c.halls||1); sv('cfg_t2',c.t2||8); sv('cfg_morning',c.matchesMorning||3);
-  sv('cfg_lunchdur',c.lunchDuration||60); sv('cfg_lunchstart',c.lunchStart||'12:30');
+  const sv=(id,v)=>{const el=document.getElementById(id);if(el)el.value=v;};
+  const sc=(id,v)=>{const el=document.getElementById(id);if(el)el.checked=v;};
+  sv('cfg_n',c.n);sv('cfg_halls',c.halls||1);sv('cfg_t1',c.t1||8);sv('cfg_t2',c.t2||5);
+  sv('cfg_waves1',c.waves1||2);sv('cfg_waves2',c.waves2||2);
+  sv('cfg_r',c.r);sv('cfg_mt',c.mt);sv('cfg_tt',c.tt);sv('cfg_tp',c.tp);
+  sv('cfg_bal',c.bal);sv('cfg_start',c.start);sv('cfg_morning',c.matchesMorning||4);
+  sv('cfg_lunchdur',c.lunchDuration||60);sv('cfg_lunchstart',c.lunchStart||'12:30');
   sc('cfg_lunch',c.lunchBreak!==false);
   onCfgChange();
 }
-
 window.saveCfgAndNext = async function(){
-  if(!isAdmin()) return;
-  const cfg=getCfg(); ST.cfg=cfg;
-  await saveTournament({ cfg, status:'setup' });
+  if(!isAdmin())return;
+  const cfg=getCfg();ST.cfg=cfg;
+  await saveTournament({cfg,status:'setup'});
   goTo(2);
-};
-
-// ══════════════════════════════════════════════════════════
-// PAGE 2 — JOUEURS (admin uniquement pour ajouter/supprimer)
-// ══════════════════════════════════════════════════════════
-window.addPlayer = async function(){
-  if(!isAdmin()) return;
-  const name=(document.getElementById('p_nm')||{}).value?.trim()||'';
-  const p1=(document.getElementById('p_p1')||{}).value?.trim()||'';
-  const p2=(document.getElementById('p_p2')||{}).value?.trim()||'';
-  const club=(document.getElementById('p_club')||{}).value?.trim()||'';
-  const lv=+((document.getElementById('p_lv')||{}).value||3);
-  if(!name){alert('Nom d\'équipe requis.');return;}
-  if(!p1||!p2){alert('Les 2 joueurs sont requis.');return;}
-  const team={id:'t'+Date.now()+Math.random().toString(36).slice(2),name,club:club||'—',p1,p2,lv,g:'M'};
-  ST.teams.push(team); ST.players=ST.teams;
-  ['p_nm','p_p1','p_p2','p_club'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
-  document.getElementById('p_nm').focus();
-  renderPlayers();
-  await saveTournament({teams:ST.teams,players:ST.teams});
-};
-
-window.delPlayer = async function(i){
-  if(!isAdmin()) return;
-  const nm = ST.teams[i]?.name||ST.players[i]?.name||'?';
-  if(!confirm(`Supprimer ${nm} ?`)) return;
-  if(ST.teams.length) ST.teams.splice(i,1);
-  else ST.players.splice(i,1);
-  ST.teams=ST.teams.length?ST.teams:ST.players;
-  ST.players=ST.teams;
-  renderPlayers();
-  await saveTournament({teams:ST.teams,players:ST.teams});
-};
-window.clearPl = async function(){
-  if(!isAdmin()) return;
-  if(!confirm('Vider la liste ?')) return;
-  ST.players=[]; renderPlayers();
-  await saveTournament({ players: ST.players });
-};
-window.autoFill = async function(){
-  if(!isAdmin()) return;
-  const req=reqN();
-  const clubs=['Club A','Club B','Club C','Club D','Club E','Club F','Club G','Club H'];
-  const fns=['Marie','Jean','Pierre','Sophie','Lucas','Emma','Hugo','Léa','Théo','Julie','Camille','Nicolas'];
-  const nms=['Dupont','Martin','Bernard','Thomas','Robert','Petit','Durand','Leroy','Moreau','Simon'];
-  while(ST.teams.length<req){
-    const i=ST.teams.length, club=clubs[i%clubs.length];
-    ST.teams.push({id:'t'+Date.now()+i+Math.random().toString(36).slice(2),
-      name:`${club} ${Math.floor(i/clubs.length)+1}`,club,
-      p1:fns[i%fns.length]+' '+nms[(i*2)%nms.length],
-      p2:fns[(i+3)%fns.length]+' '+nms[(i*2+1)%nms.length],
-      lv:1+Math.floor(Math.random()*5),g:'M'});
-  }
-  ST.players=ST.teams; renderPlayers();
-  await saveTournament({teams:ST.teams,players:ST.teams});
-};
-
-
-// ══════════════════════════════════════════════════════════
-// SCORES → Firebase (scorer + admin)
-// ══════════════════════════════════════════════════════════
-function getRes(r,w,m){
-  const key=r+'-'+w+'-'+m; const d=ST.results[key]||{};
-  return {ga:d.ga!=null?d.ga:'', gb:d.gb!=null?d.gb:''};
-}
-window.setRes = async function(r,w,m,f,v){
-  if(!isScorer()){ alert('Réservé aux scorers et admins.'); return; }
-  const key=r+'-'+w+'-'+m;
-  const cur=ST.results[key]||{ga:'',gb:''};
-  cur[f]=v===''?'':+v;
-  ST.results[key]=cur;
-  await saveResult(key, cur.ga!=null?cur.ga:'', cur.gb!=null?cur.gb:'');
-  renderRoundTabs(); renderMatches(); renderMiniStandings(); checkDone();
-};
-
-// ── Focus : sélectionne tout le contenu et marque le champ pour réécriture ──
-window.scoreFocus = function(el){
-  // Marque le champ : la prochaine frappe remplacera la valeur entière
-  el._overwrite = true;
-  // select() pour desktop — sur mobile ça ne fait pas toujours qqch, mais ça ne nuit pas
-  el.select();
-  // Fallback iOS : setSelectionRange après un micro-délai
-  setTimeout(()=>{ try{ el.setSelectionRange(0, el.value.length); }catch(e){} }, 0);
-};
-
-// ── Scores : mise à jour mémoire uniquement (pas de re-render) ──
-window.scoreInput = function(el, r, w, m, f){
-  // Mode réécriture : si le champ était focalisé et qu'on tape le premier chiffre,
-  // on remplace tout l'ancien contenu (comportement attendu sur mobile)
-  let raw = el.value.replace(/[^0-9]/g,'');
-  if(el._overwrite && raw.length > 1){
-    // Garde seulement le(s) nouveau(x) caractère(s) ajouté(s)
-    // Sur mobile, oninput peut donner "113" si l'ancienne valeur était "11" et on tape "3"
-    // On détecte le chiffre ajouté en fin de chaîne
-    const oldLen = (el._prevRaw || '').length;
-    if(raw.length > oldLen + 1){
-      // Plus d'un chiffre d'écart → l'utilisateur a tapé sur une valeur sélectionnée
-      raw = raw.slice(-(raw.length - oldLen)) || raw.slice(-1);
-    }
-  }
-  el._overwrite = false;
-  el._prevRaw = raw;
-  el.value = raw; // nettoie les caractères non numériques
-  const v = raw === '' ? '' : parseInt(raw, 10);
-  const key = r+'-'+w+'-'+m;
-  const cur = Object.assign({ga:'',gb:''}, ST.results[key]||{});
-  if(cur.ga==null) cur.ga=''; if(cur.gb==null) cur.gb='';
-  cur[f] = v;
-  ST.results[key] = cur;
-  // Mise à jour visuelle légère sans re-render (couleur gagnant)
-  const other = f==='ga' ? cur.gb : cur.ga;
-  if(v!=='' && other!==''){
-    el.classList.toggle('win-s', v > other);
-    // Met à jour l'autre champ aussi si visible
-    const matchInputs = [...document.querySelectorAll(`.sinp[data-match="${r}-${w}-${m}"]`)];
-    const otherEl = matchInputs.find(x => x.dataset.field !== f);
-    if(otherEl) otherEl.classList.toggle('win-s', other > v);
-  } else {
-    el.classList.remove('win-s');
-  }
-  // Sauvegarde + re-render différés — annule si on retape dans les 800ms
-  clearTimeout(el._saveTimer);
-  el._saveTimer = setTimeout(() => scoreFlush(r, w, m), 800);
-};
-
-// ── Sauvegarde + re-render (appelé après pause de frappe ou Enter) ──
-window.scoreFlush = async function(r, w, m){
-  const key = r+'-'+w+'-'+m;
-  const cur = ST.results[key]||{ga:'',gb:''};
-  if(cur.ga==null) cur.ga=''; if(cur.gb==null) cur.gb='';
-  // Annule les timers en cours sur les inputs de ce match avant de re-render
-  document.querySelectorAll(`.sinp[data-match="${r}-${w}-${m}"]`).forEach(el=>{
-    clearTimeout(el._saveTimer);
-  });
-  await saveResult(key, cur.ga, cur.gb);
-  // Après re-render, les anciens éléments sont détruits — reset quand même pour sécurité
-  document.querySelectorAll(`.sinp[data-match="${r}-${w}-${m}"]`).forEach(inp=>{
-    inp._overwrite = false; inp._prevRaw = inp.value;
-  });
-  renderRoundTabs(); renderMatches(); renderMiniStandings(); checkDone();
-};
-
-// ── Navigation : Enter sauvegarde immédiatement et passe au suivant ──
-window.scoreNav = function(e, el){
-  if(e.key === 'Enter'){
-    e.preventDefault();
-    clearTimeout(el._saveTimer);
-    const r=+el.dataset.rid, w=+el.dataset.wi, m=+el.dataset.mi, f=el.dataset.field;
-    scoreFlush(r, w, m).then(()=>{
-      // Après re-render, focus sur le prochain input
-      const all = [...document.querySelectorAll('.sinp:not([readonly])')];
-      if(all.length > 0) all[0].focus();
-    });
-  }
-  if(e.key === 'Tab'){
-    e.preventDefault();
-    // Tab : passe au champ suivant SANS sauvegarder encore
-    const all = [...document.querySelectorAll('.sinp:not([readonly])')];
-    const next = all[all.indexOf(el)+1];
-    if(next){ scoreFocus(next); next.focus(); }
-    else {
-      clearTimeout(el._saveTimer);
-      scoreFlush(+el.dataset.rid, +el.dataset.wi, +el.dataset.mi);
-    }
-  }
-  if(e.key === 'Escape'){
-    clearTimeout(el._saveTimer);
-    // Remet la valeur sauvegardée
-    const key = el.dataset.rid+'-'+el.dataset.wi+'-'+el.dataset.mi;
-    const cur = ST.results[key]||{};
-    el.value = cur[el.dataset.field]!=null ? cur[el.dataset.field] : '';
-    el.blur();
-  }
-};
-
-// ── scoreCommit gardé pour compatibilité (appelé nulle part mais au cas où) ──
-window.scoreCommit = function(el,r,w,m,f){ scoreFlush(r,w,m); };
-
-window.setRound = async function(r){
-  ST.activeRound=r;
-  if(isAdmin()) await saveTournament({ activeRound: r });
-  renderRoundTabs(); renderMatches(); renderSubInfo();
-};
-
-// ══════════════════════════════════════════════════════════
-// PLANNING / TOURNOI (admin uniquement)
-// ══════════════════════════════════════════════════════════
-window.startTournament = async function(){
-  if(!isAdmin()) return;
-  // Utiliser le planning déjà généré (page 3) — ne PAS régénérer aléatoirement
-  if(!ST.schedule || ST.schedule.length === 0){
-    if(!buildSchedule()) return;
-  }
-  ST.results = {}; ST.activeRound = 0;
-  await saveTournament({ schedule: ST.schedule, activeRound:0, status:'active', results:{} });
-  goTo(4);
-};
-window.regenerate = async function(){
-  if(!isAdmin()) return;
-  if(buildSchedule()){ await saveTournament({ schedule: ST.schedule, activeRound:0 }); renderGen(); }
-};
-window.newTournament = async function(){  if(!isAdmin()){ alert('Admin uniquement.'); return; }
-  if(!confirm('Nouveau tournoi ? Toutes les données seront perdues.')) return;
-  clearInterval(ST.timerIv);
-  ST.players=[]; ST.teams=[]; ST.schedule=[]; ST.results={}; ST.activeRound=0;
-  ST.timerSec=0; ST.timerRun=false; ST.rulesOpen=false;
-  document.getElementById('ruleBtn').textContent='📋 Règlement';
-  await saveTournament({ cfg:ST.cfg, teams:[], players:[], schedule:[], activeRound:0, status:'setup' });
-  renderPlayers(); goTo(1); onCfgChange();
-};
-
-// ── Réinitialiser tous les scores (admin uniquement) ──────
-window.resetAllScores = async function(){
-  if(!isAdmin()){ alert('Admin uniquement.'); return; }
-  if(!confirm('Réinitialiser TOUS les scores ?\nLe planning reste intact, seuls les résultats seront effacés.')) return;
-  // Supprimer tous les documents de la collection results
-  try {
-    const { getDocs, collection: col2, deleteDoc: delDoc2, doc: doc2 } = await import('https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js');
-    const snap = await getDocs(col2(db,'interclub_results'));
-    await Promise.all(snap.docs.map(d => delDoc2(doc2(db,'interclub_results',d.id))));
-    ST.results = {};
-    await auditLog('reset_all_scores', { count: snap.size });
-    renderTournament();
-  } catch(e){ alert('Erreur réinitialisation : '+e.message); }
-};
-
-// ══════════════════════════════════════════════════════════
-// SUBSTITUTION (admin uniquement)
-// ══════════════════════════════════════════════════════════
-window.confirmSub = async function(){
-  if(!isAdmin()){ alert('Les substitutions sont réservées à l\'admin.'); return; }
-  if(!ST.sub.selId){ alert('Sélectionnez un remplaçant.'); return; }
-  applySubstitution();
-  await saveTournament({ schedule: ST.schedule });
-  await auditLog('direct_sub',{ targetId: ST.sub.targetId, selId: ST.sub.selId, fromRound: ST.activeRound });
-  closeSubModal();
-  renderTournament();
-};
-function applySubstitution(){
-  const {targetId,selId}=ST.sub;
-  ST.schedule.forEach((rd,ri)=>{
-    if(ri<ST.activeRound) return;
-    rd.waves.forEach(wv=>wv.matches.forEach(m=>{
-      if(m.pA1===targetId) m.pA1=selId;
-      else if(m.pA2===targetId) m.pA2=selId;
-      else if(m.pB1===targetId) m.pB1=selId;
-      else if(m.pB2===targetId) m.pB2=selId;
-    }));
-    const idx=rd.subs.indexOf(targetId);
-    if(idx>=0) rd.subs.splice(idx,1,selId);
-  });
-}
-
-window.goToLive = function(){
-  if(ST.schedule.length>0) goTo(4);
-  else alert("Aucun tournoi actif pour l'instant.");
 };
 
 // ══════════════════════════════════════════════════════════
 // HELPERS TEMPS
 // ══════════════════════════════════════════════════════════
 function addMinutes(timeStr,mins){
-  if(!timeStr||typeof timeStr!=='string') return '00:00';
+  if(!timeStr||typeof timeStr!=='string')return '00:00';
   const parts=(timeStr+':00').split(':').map(Number);
   const total=parts[0]*60+parts[1]+mins;
   return String(Math.floor(total/60)%24).padStart(2,'0')+':'+String(((total%60)+60)%60).padStart(2,'0');
@@ -976,117 +479,121 @@ function addMinutes(timeStr,mins){
 // ══════════════════════════════════════════════════════════
 // PAGE 1 — CONFIG PREVIEW
 // ══════════════════════════════════════════════════════════
-function computeScheduleParams(c){
-  const N=c.n,T=c.t,R=c.r;
-  const simultaneous=T*4;
-  let wavesPerRound, activeN, rem;
-  if(c.waves && c.waves > 0){
-    wavesPerRound = c.waves;
-    const rawActive = Math.min(N, wavesPerRound * T * 4);
-    activeN = Math.floor(rawActive / 4) * 4;
-    rem = N - activeN;
-  } else {
-    rem=N%4; activeN=N-rem;
-    wavesPerRound=Math.max(1,Math.ceil(activeN/simultaneous));
-  }
-  const baseWaveSize=wavesPerRound>0?Math.floor(activeN/wavesPerRound):0;
-  const roundDuration=wavesPerRound*c.mt+(wavesPerRound-1)*c.tt;
-  const totalDuration=R*roundDuration+(R-1)*c.tp;
-  return {N,T,R,rem,activeN,wavesPerRound,baseWaveSize,simultaneous,roundDuration,totalDuration};
-}
 window.onCfgChange = function(){
-  const c=getCfg(), p=computeScheduleParams(c);
-  let cls='info-g', icon='✅', msg='';
-  if(c.n<4){ cls='info-r'; icon='❌'; msg='<strong>⚠️ Minimum 4 joueurs requis.</strong>'; }
-  else {
-    const endTime=addMinutes(c.start,p.totalDuration);
-    msg=`<strong>${p.N} joueurs</strong> · <strong>${c.t} terrains</strong> · <strong>${c.r} tours (matchs/joueur)</strong><br>`;
-    const forcedWaves = c.waves && c.waves > 0;
-    if(forcedWaves){
-      // Mode vagues forcées : calcul explicite
-      const playersPerWave = c.t * 4;
-      const totalSlots = c.waves * playersPerWave;
-      const subs = p.rem;
-      msg += `🌊 Mode <strong>${c.waves} vague${c.waves>1?'s':''} fixe${c.waves>1?'s':''}</strong> × ${c.t} terrain${c.t>1?'s':''} = <strong>${playersPerWave * c.waves} places</strong> par tour<br>`;
-      if(subs > 0){
-        cls='info-y'; icon='⚠️';
-        msg += `🟡 <strong>${subs} remplaçant${subs>1?'s':''} par tour</strong> (${p.activeN} joueurs actifs sur ${p.N})`;
-        msg += ` — les remplaçants tournent équitablement<br>`;
-      } else if(totalSlots > p.N){
-        msg += `⚠️ ${c.waves} vague${c.waves>1?'s':''} × ${playersPerWave} = ${totalSlots} places, mais seulement ${p.N} joueurs — l'algorithme réduira les vagues vides<br>`;
-      } else {
-        msg += `✅ Tous les joueurs jouent à chaque tour<br>`;
-      }
-      msg += `Durée estimée : <strong>~${p.totalDuration} min</strong> · Fin vers <strong>${endTime}</strong>`;
-      msg += `<br>📋 Structure : ${c.r} tours de <strong>${p.wavesPerRound} vague${p.wavesPerRound>1?'s':''}</strong> × ${c.mt} min (+${c.tt} min transition)`;
-    } else {
-      // Mode automatique
-      msg+=`Vagues par tour : <strong>${p.wavesPerRound}</strong> × ${p.baseWaveSize} joueurs simultanés`;
-      if(p.rem>0) msg+=` + <strong>${p.rem} remplaçant${p.rem>1?'s':''}</strong>`;
-      msg+='<br>';
-      if(p.rem===0&&p.wavesPerRound===1&&c.n>=c.t*4)
-        msg+=`✅ Tous les joueurs jouent à chaque tour · Terrains toujours remplis<br>`;
-      else if(p.rem===0)
-        msg+=`✅ Tous les joueurs jouent à chaque tour · Terrains libres comblés par matchs anticipés<br>`;
-      else
-        msg+=`⚠️ ${p.rem} joueur${p.rem>1?'s':''}/tour au repos — terrains libres comblés par matchs anticipés<br>`;
-      msg+=`Durée estimée : <strong>~${p.totalDuration} min</strong> · Fin vers <strong>${endTime}</strong>`;
-      if(p.wavesPerRound>1)
-        msg+=`<br>📋 Structure : ${c.r} tours de ${p.wavesPerRound} vagues × ${c.mt}min (+${c.tt}min transition)`;
-    }
-  }
-  document.getElementById('cfgBox').className='info '+cls;
-  document.getElementById('cfgBox').innerHTML=icon+' '+msg;
-  // Mise à jour de l'indication sous le select vagues
-  const hint = document.getElementById('wavesHint');
-  if(hint){
-    const c2=getCfg();
-    if(c2.waves && c2.waves>0 && c2.n>=4){
-      const slots = c2.waves * c2.t * 4;
-      const subs2 = Math.max(0, c2.n - Math.floor(Math.min(c2.n,slots)/4)*4);
-      hint.innerHTML = subs2>0
-        ? `→ ${Math.min(c2.n,slots) - subs2} joueurs jouent · <strong style="color:#e87040">${subs2} remplaçant${subs2>1?'s':''}/tour</strong>`
-        : `→ Tous les ${c2.n} joueurs jouent`;
-    } else { hint.innerHTML=''; }
-  }
-  // Afficher/masquer salle 2 et déjeuner
-  const c3=getCfg();
+  const c=getCfg();
+  // Afficher/masquer salle 2
   const hall2Row=document.getElementById('hall2Row');
-  if(hall2Row) hall2Row.style.display=c3.halls===2?'':'none';
+  if(hall2Row) hall2Row.style.display=c.halls===2?'':'none';
   const lunchRow=document.getElementById('lunchRow');
-  if(lunchRow) lunchRow.style.display=c3.lunchBreak?'':'none';
+  if(lunchRow) lunchRow.style.display=c.lunchBreak?'':'none';
   const aftDisp=document.getElementById('cfg_afternoon_display');
-  if(aftDisp) aftDisp.textContent=c3.matchesAfternoon>0?c3.matchesAfternoon:'?';
+  if(aftDisp) aftDisp.textContent=c.matchesAfternoon>0?c.matchesAfternoon:'?';
+
+  // Calcul des capacités par poule
+  const totalTeams=c.n;
+  const teamsH1=c.halls===2?Math.ceil(totalTeams/2):totalTeams;
+  const teamsH2=c.halls===2?Math.floor(totalTeams/2):0;
+  const simultH1=c.t1*2; // 2 équipes par terrain en interclub
+  const simultH2=c.t2*2;
+  const wavesH1=c.waves1||2;
+  const wavesH2=c.waves2||2;
+  const capacH1=wavesH1*simultH1;
+  const capacH2=c.halls===2?wavesH2*simultH2:0;
+
+  const morningEnd=addMinutes(c.start,c.matchesMorning*(c.mt+c.tt)-c.tt);
+  const aftStart=c.lunchBreak?addMinutes(c.lunchStart||'12:30',c.lunchDuration||60):morningEnd;
+  const aftEnd=addMinutes(aftStart,c.matchesAfternoon*(c.mt+c.tt)-c.tt);
+  const roundDurH1=wavesH1*c.mt+(wavesH1-1)*c.tt;
+  const totalDur=c.r*roundDurH1+(c.r-1)*c.tp;
+  const endTime=addMinutes(c.start,totalDur);
+
   const hallsInfo=document.getElementById('hallsInfo');
-  if(hallsInfo && c3.n>=4){
-    const totalCourts=c3.t+(c3.halls===2?c3.t2:0);
-    const morningEnd=addMinutes(c3.start,c3.matchesMorning*(c3.mt+c3.tt)-c3.tt);
-    const aftStart=c3.lunchBreak?addMinutes(c3.lunchStart||'12:30',c3.lunchDuration||60):morningEnd;
-    const aftEnd=addMinutes(aftStart,c3.matchesAfternoon*(c3.mt+c3.tt)-c3.tt);
+  if(hallsInfo&&c.n>=4){
+    let html=`<strong>${c.halls} salle${c.halls>1?'s':''}</strong> · `;
+    if(c.halls===1){
+      html+=`<strong>${c.t1} terrains</strong> · ${wavesH1} vague${wavesH1>1?'s':''}/tour · `;
+      html+=`Capacité ${capacH1} équipes/tour`;
+      if(capacH1<teamsH1) html+=` · <span style="color:var(--ylw)">⚠️ ${teamsH1-capacH1} équipe(s) exemptes/tour</span>`;
+      else html+=` · <span style="color:var(--grn)">✅ Toutes jouent</span>`;
+    } else {
+      html+=`Salle 1 : <strong>${c.t1} terrains</strong> ${wavesH1}v · ${teamsH1} équipes<br>`;
+      html+=`Salle 2 : <strong>${c.t2} terrains</strong> ${wavesH2}v · ${teamsH2} équipes<br>`;
+      const ok1=capacH1>=teamsH1,ok2=capacH2>=teamsH2;
+      if(!ok1) html+=`⚠️ Salle 1 : ${capacH1} places, ${teamsH1} équipes → ${teamsH1-capacH1} exemptes<br>`;
+      if(!ok2) html+=`⚠️ Salle 2 : ${capacH2} places, ${teamsH2} équipes → ${teamsH2-capacH2} exemptes<br>`;
+      if(ok1&&ok2) html+=`✅ Toutes les équipes jouent à chaque tour`;
+    }
+    html+=`<br>☀️ Matin : <strong>${c.matchesMorning} tours</strong> (${c.start} → ${morningEnd})`;
+    if(c.lunchBreak) html+=` · 🍽️ Déjeuner ${c.lunchStart||'12:30'} (${c.lunchDuration||60} min)`;
+    html+=`<br>🌤️ Après-midi : <strong>${c.matchesAfternoon} tours</strong> (${aftStart} → ${aftEnd})`;
     hallsInfo.className='info info-b';
-    hallsInfo.innerHTML=`<strong>${c3.halls} salle${c3.halls>1?'s':''}</strong> · <strong>${totalCourts} terrain${totalCourts>1?'s':''}</strong><br>`
-      +`☀️ Matin : <strong>${c3.matchesMorning} tours</strong> (${c3.start} → ${morningEnd})`
-      +(c3.lunchBreak?` · 🍽️ Déjeuner ${c3.lunchStart||'12:30'} (${c3.lunchDuration||60} min)`:'')+`<br>`
-      +`🌤️ Après-midi : <strong>${c3.matchesAfternoon} tours</strong> (${aftStart} → ${aftEnd})`;
+    hallsInfo.style.display='';
+    hallsInfo.innerHTML=html;
+  } else if(hallsInfo) hallsInfo.style.display='none';
+
+  let cls='info-g',icon='✅',msg='';
+  if(c.n<4){cls='info-r';icon='❌';msg='<strong>⚠️ Minimum 4 équipes requises.</strong>';}
+  else{
+    msg=`<strong>${c.n} équipes</strong> · <strong>${c.halls===2?c.t1+'+'+c.t2:c.t1} terrains</strong> · <strong>${c.r} tours</strong><br>`;
+    msg+=`Durée estimée : <strong>~${totalDur} min</strong> · Fin vers <strong>${endTime}</strong>`;
   }
+  const cfgBox=document.getElementById('cfgBox');
+  if(cfgBox){cfgBox.className='info '+cls;cfgBox.innerHTML=icon+' '+msg;}
   updateFwdBtn();
 };
 
 // ══════════════════════════════════════════════════════════
-// PAGE 2 — JOUEURS render
+// PAGE 2 — ÉQUIPES
 // ══════════════════════════════════════════════════════════
-const NMS_M=['Alexandre','Baptiste','Cédric','David','Émile','Florian','Gabriel','Hugo','Ivan','Julien','Kevin','Lucas','Martin','Nicolas','Olivier','Pierre','Quentin','Raphaël','Sébastien','Thomas','Ulysse','Victor','William','Xavier','Yann','Zadig','Alexis','Benjamin','Charles','Damien','François','Gaston','Henri','Igor','José','Karl','Laurent','Michel','Nathan','Oscar','Pascal'];
-const NMS_F=['Alice','Béatrice','Camille','Diane','Élise','Flora','Gaëlle','Héloïse','Inès','Julie','Karine','Laura','Marie','Nathalie','Ophélie','Pauline','Rébecca','Sophie','Tina','Ursula','Valentine','Wendy','Yasmine','Zoé','Amandine','Brigitte','Céline','Delphine','Emma','Fatima','Gina','Hana','Iris','Julia','Karen','Léa','Manon','Nadia','Océane'];
-
-function reqN(){ return ST.cfg.n; }
+window.addPlayer = async function(){
+  if(!isAdmin())return;
+  const name=(document.getElementById('p_nm')||{}).value?.trim()||'';
+  const p1=(document.getElementById('p_p1')||{}).value?.trim()||'';
+  const p2=(document.getElementById('p_p2')||{}).value?.trim()||'';
+  const club=(document.getElementById('p_club')||{}).value?.trim()||'';
+  const lv=+((document.getElementById('p_lv')||{}).value||3);
+  if(!name){alert('Nom d\'équipe requis.');return;}
+  if(!p1||!p2){alert('Les 2 joueurs sont requis.');return;}
+  const team={id:'t'+Date.now()+Math.random().toString(36).slice(2),name,club:club||'—',p1,p2,lv,g:'M'};
+  ST.teams.push(team);
+  ['p_nm','p_p1','p_p2','p_club'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
+  document.getElementById('p_nm').focus();
+  renderPlayers(); await saveTournament({teams:ST.teams});
+};
+window.delPlayer = async function(i){
+  if(!isAdmin())return;
+  if(!confirm(`Supprimer ${ST.teams[i]?.name||'?'} ?`))return;
+  ST.teams.splice(i,1); renderPlayers(); await saveTournament({teams:ST.teams});
+};
+window.clearPl = async function(){
+  if(!isAdmin())return;
+  if(!confirm('Vider la liste ?'))return;
+  ST.teams=[]; renderPlayers(); await saveTournament({teams:[]});
+};
+window.autoFill = async function(){
+  if(!isAdmin())return;
+  const req=ST.cfg.n;
+  const clubs=['Club A','Club B','Club C','Club D','Club E','Club F','Club G','Club H'];
+  const fns=['Marie','Jean','Pierre','Sophie','Lucas','Emma','Hugo','Léa','Théo','Julie','Camille','Nicolas'];
+  const nms=['Dupont','Martin','Bernard','Thomas','Robert','Petit','Durand','Leroy','Moreau','Simon'];
+  while(ST.teams.length<req){
+    const i=ST.teams.length,club=clubs[i%clubs.length];
+    ST.teams.push({id:'t'+Date.now()+i+Math.random().toString(36).slice(2),
+      name:`${club} ${Math.floor(i/clubs.length)+1}`,club,
+      p1:fns[i%fns.length]+' '+nms[(i*2)%nms.length],
+      p2:fns[(i+3)%fns.length]+' '+nms[(i*2+1)%nms.length],
+      lv:1+Math.floor(Math.random()*5),g:'M'});
+  }
+  renderPlayers(); await saveTournament({teams:ST.teams});
+};
 function renderPlayers(){
-  const req=reqN(), n=ST.teams.length, pct=Math.min(100,(n/req)*100);
-  const el=document.getElementById('pCount'); if(!el) return;
+  const req=ST.cfg.n,n=ST.teams.length,pct=Math.min(100,(n/req)*100);
+  const el=document.getElementById('pCount');if(!el)return;
   el.textContent=`${n} / ${req} équipes`;
   el.style.color=n>=req?'var(--grn)':n>0?'var(--ylw)':'var(--muted)';
-  const pp=document.getElementById('pProg'); if(pp) pp.style.width=pct+'%';
-  const bg=document.getElementById('btnGo3'); if(bg) bg.disabled=n<req;
-  const list=document.getElementById('pList'); if(!list) return;
+  const pp=document.getElementById('pProg');if(pp)pp.style.width=pct+'%';
+  const bg=document.getElementById('btnGo3');if(bg)bg.disabled=n<req;
+  const list=document.getElementById('pList');if(!list)return;
   if(!n){list.innerHTML='<div class="txt-muted" style="padding:10px 0">Aucune équipe.</div>';return;}
   list.innerHTML=ST.teams.map((t,i)=>`
     <div class="prow">
@@ -1095,510 +602,329 @@ function renderPlayers(){
       <span class="p-nm" data-playeridx="${i}">${t.name}</span>
       <span class="tag" style="background:var(--blu-bg);color:var(--blu);border:1px solid var(--bdr2);border-radius:10px;font-size:10px;padding:1px 8px">${t.club||'—'}</span>
       <span class="p-lvl">${'★'.repeat(t.lv)}${'☆'.repeat(5-t.lv)}</span>
-      <span style="font-size:11px;color:var(--muted);margin-left:4px">${t.p1} & ${t.p2}</span>
-      ${isScorer()?`<button class="pedit" title="Modifier" onclick="editPlayerName(${i})">✏️</button>`:''}
+      <span style="font-size:11px;color:var(--muted);margin-left:4px">${t.p1} &amp; ${t.p2}</span>
       ${isAdmin()?`<button class="pdel" onclick="delPlayer(${i})">×</button>`:''}
     </div>`).join('');
   updateFwdBtn();
 }
 
 // ══════════════════════════════════════════════════════════
-// SCHEDULE BUILDER v5 (identique v5 original)
+// SCORES
+// ══════════════════════════════════════════════════════════
+function getRes(key){ const d=ST.results[key]||{}; return {ga:d.ga!=null?d.ga:'',gb:d.gb!=null?d.gb:''}; }
+
+window.setRes = async function(key,f,v){
+  if(!isScorer()){alert('Réservé aux scorers et admins.');return;}
+  const cur=Object.assign({ga:'',gb:''},ST.results[key]||{});
+  cur[f]=v===''?'':+v;
+  ST.results[key]=cur;
+  await saveResult(key,cur.ga!=null?cur.ga:'',cur.gb!=null?cur.gb:'');
+  renderRoundTabs();renderMatches();renderMiniStandings();checkDone();
+};
+
+window.scoreFocus = function(el){ el._overwrite=true; el.select(); setTimeout(()=>{try{el.setSelectionRange(0,el.value.length);}catch(e){}},0); };
+
+window.scoreInput = function(el,key,f){
+  let raw=el.value.replace(/[^0-9]/g,'');
+  if(el._overwrite&&raw.length>1){ const oldLen=(el._prevRaw||'').length; if(raw.length>oldLen+1){raw=raw.slice(-(raw.length-oldLen))||raw.slice(-1);} }
+  el._overwrite=false; el._prevRaw=raw; el.value=raw;
+  const v=raw===''?'':parseInt(raw,10);
+  const cur=Object.assign({ga:'',gb:''},ST.results[key]||{});
+  if(cur.ga==null)cur.ga='';if(cur.gb==null)cur.gb='';
+  cur[f]=v; ST.results[key]=cur;
+  const other=f==='ga'?cur.gb:cur.ga;
+  if(v!==''&&other!==''){
+    el.classList.toggle('win-s',v>other);
+    const otherEl=[...document.querySelectorAll(`.sinp[data-key="${key}"]`)].find(x=>x.dataset.field!==f);
+    if(otherEl)otherEl.classList.toggle('win-s',other>v);
+  } else el.classList.remove('win-s');
+  clearTimeout(el._saveTimer);
+  el._saveTimer=setTimeout(()=>scoreFlush(key),800);
+};
+
+window.scoreFlush = async function(key){
+  const cur=ST.results[key]||{ga:'',gb:''};
+  if(cur.ga==null)cur.ga='';if(cur.gb==null)cur.gb='';
+  document.querySelectorAll(`.sinp[data-key="${key}"]`).forEach(el=>{ clearTimeout(el._saveTimer); });
+  await saveResult(key,cur.ga,cur.gb);
+  document.querySelectorAll(`.sinp[data-key="${key}"]`).forEach(inp=>{ inp._overwrite=false;inp._prevRaw=inp.value; });
+  renderRoundTabs();renderMatches();renderMiniStandings();checkDone();
+};
+
+window.scoreNav = function(e,el){
+  if(e.key==='Enter'){ e.preventDefault(); clearTimeout(el._saveTimer); scoreFlush(el.dataset.key).then(()=>{ const all=[...document.querySelectorAll('.sinp:not([readonly])')]; if(all.length>0)all[0].focus(); }); }
+  if(e.key==='Tab'){ e.preventDefault(); const all=[...document.querySelectorAll('.sinp:not([readonly])')]; const next=all[all.indexOf(el)+1]; if(next){scoreFocus(next);next.focus();}else{clearTimeout(el._saveTimer);scoreFlush(el.dataset.key);} }
+  if(e.key==='Escape'){ clearTimeout(el._saveTimer); const cur=ST.results[el.dataset.key]||{}; el.value=cur[el.dataset.field]!=null?cur[el.dataset.field]:''; el.blur(); }
+};
+
+window.setRound = async function(r){
+  ST.activeRound=r;
+  if(isAdmin()) await saveTournament({activeRound:r});
+  renderRoundTabs();renderMatches();renderSubInfo();
+};
+
+// ══════════════════════════════════════════════════════════
+// SCHEDULE BUILDER — FORMAT INTERCLUB ÉQUIPES FIXES
+// Chaque tour = vagues par salle (dense round-robin)
+// 2 salles = 2 poules séparées
 // ══════════════════════════════════════════════════════════
 function shuffle(a){const b=[...a];for(let i=b.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[b[i],b[j]]=[b[j],b[i]];}return b;}
-function pk(a,b){return a<b?a+'-'+b:b+'-'+a;}
-function pLv(id){const p=(ST.teams.length?ST.teams:ST.players).find(x=>x.id===id);return p?p.lv:3;}
-function pGender(id){const p=(ST.teams.length?ST.teams:ST.players).find(x=>x.id===id);return p?p.g:'M';}
 
-// ─────────────────────────────────────────────────────────────
-// SCORE D'UN MATCH — pénalités/récompenses (plus bas = mieux)
-// ─────────────────────────────────────────────────────────────
-function pClub(id){const p=(ST.teams.length?ST.teams:ST.players).find(x=>x.id===id);return p?(p.club||''):''}
+// Génère les matchs d'une poule pour UN tour (round-robin dense)
+// teams : IDs, courts : nb terrains, waves : nb vagues/tour
+// oppCount : {pk: nb fois adversaires} pour éviter doublons
+function buildRoundForHall(teams,courts,waves,oppCount,roundIdx){
+  const n=teams.length;
+  if(n<2)return{waves:[],subs:[]};
 
-function matchScore(pA1,pA2,pB1,pB2,bal){
-  let sc=0;
-  const lA1=pLv(pA1),lA2=pLv(pA2),lB1=pLv(pB1),lB2=pLv(pB2);
-  const gA1=pGender(pA1),gA2=pGender(pA2),gB1=pGender(pB1),gB2=pGender(pB2);
-  // Pénalité si même club s'affronte (interclub)
-  const clubA=pClub(pA1),clubB=pClub(pB1);
-  if(clubA&&clubB&&clubA!=='—'&&clubA===clubB) sc+=5000;
+  // Capacité par tour : waves * courts * 2 équipes
+  const capacity=waves*courts*2;
+  const subs=[];
+  let active=[...teams];
 
-  if(bal==='level'||bal==='both'){
-    // Pénalité si partenaires de niveaux trop différents
-    sc+=Math.abs(lA1-lA2)*90;
-    sc+=Math.abs(lB1-lB2)*90;
-    // Pénalité forte si les deux équipes ont un écart de niveau total (évite deb vs elite)
-    sc+=Math.abs((lA1+lA2)-(lB1+lB2))*150;
-    // Pénalité supplémentaire si un débutant (lv=1) est opposé à un élite (lv=5)
-    const minA=Math.min(lA1,lA2),maxA=Math.max(lA1,lA2);
-    const minB=Math.min(lB1,lB2),maxB=Math.max(lB1,lB2);
-    if(minA<=1&&maxB>=5) sc+=500;
-    if(minB<=1&&maxA>=5) sc+=500;
+  // Si trop d'équipes, certaines sont exemptes (rotation équitable)
+  if(n>capacity){
+    // Trier par moins de matchs joués puis aléatoire
+    const playCount=Object.fromEntries(teams.map(id=>[id,0]));
+    // (simplifié : exempte les dernières de la liste triée par roundIdx)
+    const exemptCount=n-capacity;
+    const sorted=[...teams].sort((a,b)=>Math.random()-.5);
+    for(let i=0;i<exemptCount;i++) subs.push(sorted[i]);
+    active=sorted.slice(exemptCount);
   }
 
-  if(bal==='gender'||bal==='both'){
-    const mixA=(gA1==='M'&&gA2==='F')||(gA1==='F'&&gA2==='M');
-    const mixB=(gB1==='M'&&gB2==='F')||(gB1==='F'&&gB2==='M');
-    const gs=[gA1,gA2,gB1,gB2];
-    const nM=gs.filter(g=>g==='M').length;
-    const nF=gs.filter(g=>g==='F').length;
-    // Forte récompense par paire mixte
-    if(mixA) sc-=700;
-    if(mixB) sc-=700;
-    // Pénalité asymétrie (une paire mixte, l'autre non)
-    if(mixA!==mixB) sc+=350;
-    // Si le groupe contient assez de H et F pour être mixte partout → obligation
-    if(nM>=2&&nF>=2){
-      if(!mixA) sc+=1000;
-      if(!mixB) sc+=1000;
-    }
-  }
-  return sc;
-}
+  // Tenter de former des matchs sans répéter les confrontations
+  // Algorithme : liste d'adjacence + backtracking léger
+  const waveMatches=[];
+  let remaining=[...active];
 
-// Renvoie true si la contrainte mixité stricte est satisfaite
-function isMixForced(pA1,pA2,pB1,pB2){
-  const gs=[pGender(pA1),pGender(pA2),pGender(pB1),pGender(pB2)];
-  const nM=gs.filter(g=>g==='M').length,nF=gs.filter(g=>g==='F').length;
-  if(nM<2||nF<2) return true;
-  const mixA=(gs[0]!==gs[1])&&(gs[0]==='M'||gs[0]==='F')&&(gs[1]==='M'||gs[1]==='F');
-  const mixB=(gs[2]!==gs[3])&&(gs[2]==='M'||gs[2]==='F')&&(gs[3]==='M'||gs[3]==='F');
-  return mixA&&mixB;
-}
-
-// ─────────────────────────────────────────────────────────────
-// FORMATION DU GROUPE OPTIMISÉ (mixité + niveau) avant tirage
-// Construit un groupe de N joueurs depuis un pool en cherchant
-// la meilleure répartition H/F et niveaux pour les terrains
-// ─────────────────────────────────────────────────────────────
-function buildOptimalGroup(pool, n, bal){
-  if(pool.length<=n) return [...pool];
-  // On cherche parmi plusieurs tentatives le groupe de n joueurs
-  // dont le score global de matchs possibles est le meilleur
-  // (on simule le meilleur appariement possible pour chaque combinaison)
-  // Pour des raisons de performance on essaie des groupes guidés
-  let bestGroup=null, bestSc=Infinity;
-  const attempts=30;
-  for(let att=0;att<attempts;att++){
-    let candidate;
-    if(bal==='both'||bal==='gender'){
-      // Construire un groupe en alternant H et F selon disponibilité
-      const males=shuffle(pool.filter(p=>p.g==='M'));
-      const females=shuffle(pool.filter(p=>p.g==='F'));
-      const others=shuffle(pool.filter(p=>p.g==='X'));
-      candidate=[];
-      const perTerrain=4, nT=n/4;
-      // Pour chaque terrain vouloir 2H+2F si possible
-      const wantM=Math.min(nT*2,males.length);
-      const wantF=Math.min(nT*2,females.length);
-      for(let i=0;i<wantM;i++) candidate.push(males[i]);
-      for(let i=0;i<wantF;i++) candidate.push(females[i]);
-      // Compléter avec les autres genres si pas assez
-      let extra=[...males.slice(wantM),...females.slice(wantF),...others];
-      shuffle(extra);
-      while(candidate.length<n&&extra.length>0) candidate.push(extra.shift());
-      if(candidate.length<n) break;
-    } else {
-      candidate=shuffle([...pool]).slice(0,n);
-    }
-    // Évalue le score global théorique de ce groupe
-    const ids=candidate.map(p=>p.id);
-    let sc=0;
-    // Paires naïves pour évaluation rapide
-    for(let i=0;i<ids.length;i+=4){
-      if(i+3>=ids.length) break;
-      sc+=matchScore(ids[i],ids[i+1],ids[i+2],ids[i+3],bal);
-    }
-    if(sc<bestSc){bestSc=sc;bestGroup=candidate;}
-  }
-  return bestGroup||shuffle([...pool]).slice(0,n);
-}
-
-// ─────────────────────────────────────────────────────────────
-// VALIDATION D'UN MATCH selon le mode relax
-// ─────────────────────────────────────────────────────────────
-function isMatchValid(pA1,pA2,pB1,pB2,pairCount,oppCount,lastPartnerRound,currentRound){
-  if((pairCount[pk(pA1,pA2)]||0)>=1)return false;
-  if((pairCount[pk(pB1,pB2)]||0)>=1)return false;
-  const opps=[[pA1,pB1],[pA1,pB2],[pA2,pB1],[pA2,pB2]];
-  for(const[x,y]of opps){if((oppCount[pk(x,y)]||0)>=1)return false;}
-  for(const[x,y]of opps){const lastP=lastPartnerRound[pk(x,y)];if(lastP!==undefined&&currentRound-lastP<=1)return false;}
-  return true;
-}
-
-// ─────────────────────────────────────────────────────────────
-// GÉNÉRATION DES MATCHS pour un groupe
-// Cherche la meilleure combinaison : rotation + mixité + niveau
-// ─────────────────────────────────────────────────────────────
-function makeMatchesStrict(group,pairCount,oppCount,lastPartnerRound,currentRound,cfg){
-  if(group.length<4)return[];
-  const n=group.length,bal=cfg.bal;
-  const strictGender=(bal==='gender'||bal==='both');
-  const strictLevel=(bal==='level'||bal==='both');
-
-  for(let relaxMode=0;relaxMode<=4;relaxMode++){
-    const enforceGender=strictGender&&relaxMode<3;
-    let bestMatches=null,bestScore=Infinity;
-    const maxAttempts=relaxMode===0?30:relaxMode<=2?15:8;
-
-    for(let attempt=0;attempt<maxAttempts;attempt++){
-      // Trier le groupe selon mixité+niveau avant de l'explorer
-      let sorted;
-      if(bal==='both'||bal==='gender'){
-        // Interleave H et F triés par niveau décroissant
-        const ms=shuffle(group.filter(id=>pGender(id)==='M')).sort((a,b)=>pLv(b)-pLv(a));
-        const fs=shuffle(group.filter(id=>pGender(id)==='F')).sort((a,b)=>pLv(b)-pLv(a));
-        const xs=shuffle(group.filter(id=>pGender(id)==='X')).sort((a,b)=>pLv(b)-pLv(a));
-        sorted=[];
-        const ml=Math.max(ms.length,fs.length,xs.length);
-        for(let i=0;i<ml;i++){if(i<ms.length)sorted.push(ms[i]);if(i<fs.length)sorted.push(fs[i]);if(i<xs.length)sorted.push(xs[i]);}
-      } else if(bal==='level'){
-        // Tri serpentin par niveau (meilleur+pire ensemble)
-        const byLv=[...group].sort((a,b)=>pLv(b)-pLv(a));
-        sorted=[];const half=Math.floor(byLv.length/2);
-        for(let i=0;i<half;i++){sorted.push(byLv[i]);sorted.push(byLv[byLv.length-1-i]);}
-        if(byLv.length%2) sorted.push(byLv[half]);
-      } else {
-        sorted=shuffle(group);
-      }
-
-      const used=new Set();const matches=[];let sc=0,ok=true;
-      while(true){
-        const avail=sorted.filter(id=>!used.has(id));
-        if(avail.length<4)break;
-        let bestM=null,bestMSc=Infinity;
-
-        // Essayer chaque joueur disponible comme ancre a1 (pas seulement avail[0])
-        // Évite l'échec greedy quand le premier joueur est bloquant
-        for(let a1idx=0;a1idx<avail.length&&!bestM;a1idx++){
-          const a1=avail[a1idx];
-          for(let i=0;i<avail.length;i++){
-            if(i===a1idx)continue;const a2=avail[i];
-            for(let j=0;j<avail.length;j++){
-              if(j===a1idx||j===i)continue;const b1=avail[j];
-              for(let k=j+1;k<avail.length;k++){
-                if(k===a1idx||k===i)continue;const b2=avail[k];
-                let valid=true;
-                if(relaxMode===0) valid=isMatchValid(a1,a2,b1,b2,pairCount,oppCount,lastPartnerRound,currentRound);
-                else if(relaxMode===1){
-                  if((pairCount[pk(a1,a2)]||0)>=1||(pairCount[pk(b1,b2)]||0)>=1)valid=false;
-                  else{const opps=[[a1,b1],[a1,b2],[a2,b1],[a2,b2]];for(const[x,y]of opps)if((oppCount[pk(x,y)]||0)>=1){valid=false;break;}}
-                }
-                else if(relaxMode===2||relaxMode===3){
-                  // Autorise doublons adversaires mais pas doublons partenaires
-                  if((pairCount[pk(a1,a2)]||0)>=1||(pairCount[pk(b1,b2)]||0)>=1)valid=false;
-                }
-                else if(relaxMode>=4){
-                  // Mode tout relâché : aucune contrainte de rotation
-                  valid=true;
-                }
-                // Mixité obligatoire si possible
-                if(valid&&enforceGender) valid=isMixForced(a1,a2,b1,b2);
-                if(!valid)continue;
-                const msc=matchScore(a1,a2,b1,b2,bal);
-                if(msc<bestMSc){bestMSc=msc;bestM={pA1:a1,pA2:a2,pB1:b1,pB2:b2};}
-              }
-            }
-          }
-        }
-        if(!bestM){ok=false;break;}
-        matches.push(bestM);sc+=bestMSc;
-        [bestM.pA1,bestM.pA2,bestM.pB1,bestM.pB2].forEach(id=>used.add(id));
-      }
-      if(ok&&matches.length*4===n&&sc<bestScore){bestScore=sc;bestMatches=matches;}
-    }
-
-    if(bestMatches&&bestMatches.length*4===n){
-      if(relaxMode>0)bestMatches.forEach(m=>{m._relaxed=relaxMode;});
-      bestMatches.forEach(m=>{
-        const kp1=pk(m.pA1,m.pA2),kp2=pk(m.pB1,m.pB2);
-        pairCount[kp1]=(pairCount[kp1]||0)+1;pairCount[kp2]=(pairCount[kp2]||0)+1;
-        lastPartnerRound[kp1]=currentRound;lastPartnerRound[kp2]=currentRound;
-        [m.pA1,m.pA2].forEach(a=>[m.pB1,m.pB2].forEach(b=>{const ko=pk(a,b);oppCount[ko]=(oppCount[ko]||0)+1;}));
-      });
-      return bestMatches;
-    }
-  }
-  // Fallback absolu : forcer les matchs sans aucune contrainte
-  const used2=new Set();const matches2=[];
-  const grp2=[...group];
-  while(grp2.filter(id=>!used2.has(id)).length>=4){
-    const avail=grp2.filter(id=>!used2.has(id));
-    const m={pA1:avail[0],pA2:avail[1],pB1:avail[2],pB2:avail[3],_relaxed:4};
-    matches2.push(m);
-    [avail[0],avail[1],avail[2],avail[3]].forEach(id=>used2.add(id));
-  }
-  if(matches2.length>0){
-    matches2.forEach(m=>{
-      const kp1=pk(m.pA1,m.pA2),kp2=pk(m.pB1,m.pB2);
-      pairCount[kp1]=(pairCount[kp1]||0)+1;pairCount[kp2]=(pairCount[kp2]||0)+1;
-      lastPartnerRound[kp1]=currentRound;lastPartnerRound[kp2]=currentRound;
-      [m.pA1,m.pA2].forEach(a=>[m.pB1,m.pB2].forEach(b=>{const ko=pk(a,b);oppCount[ko]=(oppCount[ko]||0)+1;}));
+  for(let w=0;w<waves;w++){
+    const wSize=Math.min(courts*2,remaining.length);
+    if(wSize<2){break;}
+    const wTeams=remaining.splice(0,wSize);
+    const matches=pairTeams(wTeams,oppCount,roundIdx);
+    waveMatches.push(matches);
+    // Mettre à jour oppCount
+    matches.forEach(m=>{
+      const k=pk2(m.tA,m.tB);
+      oppCount[k]=(oppCount[k]||0)+1;
     });
-    return matches2;
   }
-  return[];
+
+  return{waves:waveMatches,subs};
 }
 
-// ─────────────────────────────────────────────────────────────
-// TRI DES REMPLAÇANTS : équité d'abord, niveau faible ensuite
-// ─────────────────────────────────────────────────────────────
-function sortForSubs(ids,playCount,byeCount){
-  return [...ids].sort((a,b)=>{
-    // 1. Moins de matchs joués → remplaçant en priorité
-    if(playCount[b]!==playCount[a]) return playCount[b]-playCount[a];
-    // 2. Déjà plus souvent remplaçant → moins prioritaire cette fois
-    if(byeCount[a]!==byeCount[b]) return byeCount[a]-byeCount[b];
-    // 3. Niveau le plus faible → remplaçant en priorité (débutants d'abord)
-    if(pLv(a)!==pLv(b)) return pLv(a)-pLv(b);
-    return Math.random()-.5;
-  });
-}
+function pk2(a,b){return a<b?a+'|'+b:b+'|'+a;}
 
-function buildSchedule(maxAttempts=24){
-  const cfg=getCfg();if(cfg.n<4){alert('Il faut au moins 4 joueurs.');return false;}
-  ST.cfg=cfg;
-  const N=cfg.n,T=cfg.t,R=cfg.r;
-  // Vagues : forcées ou automatiques
-  const forcedWaves = cfg.waves && cfg.waves > 0;
-  let wavesPerRound, activeN, rem;
-  if(forcedWaves){
-    wavesPerRound = cfg.waves;
-    const maxActive = wavesPerRound * T * 4;
-    // activeN = plus grand multiple de 4 ne dépassant pas min(N, maxActive)
-    const rawActive = Math.min(N, maxActive);
-    activeN = Math.floor(rawActive / 4) * 4;
-    rem = N - activeN;
-  } else {
-    rem=N%4; activeN=N-rem;
-    wavesPerRound=Math.max(1,Math.ceil(activeN/(T*4)));
-  }
-  // Calcul des tailles de vagues (répartition équilibrée, max T*4 par vague)
-  const waveSizes=[];{let rem2=activeN;for(let w=0;w<wavesPerRound;w++){const sz=Math.min(T*4,Math.round(rem2/(wavesPerRound-w)/4)*4||4);waveSizes.push(Math.max(4,sz));rem2-=sz;}}
-  let bestSched=null,bestScore=Infinity;
+function pairTeams(teams,oppCount,roundIdx){
+  // Appariement optimal : minimiser les répétitions d'adversaires et équilibrer les niveaux
+  const n=teams.length;
+  const matches=[];
+  const used=new Set();
 
-  for(let att=0;att<maxAttempts;att++){
-    const pairCount={},oppCount={},lastPartnerRound={},byeCount={},playCount={};
-    // lastWaveIdx[id] = indice de la dernière vague jouée par ce joueur (au tour précédent)
-    // Permet de prioriser ceux qui ont joué en dernière vague → ils attendent le plus
-    const lastWaveIdx={};
-    const source=ST.teams.length>=N?ST.teams:ST.players;
-    const players=source.slice(0,N).map(p=>p.id);
-    players.forEach(id=>{byeCount[id]=0;playCount[id]=0;lastWaveIdx[id]=-1;});
-    let pool=[...source.slice(0,N)];
-    if(cfg.bal==='level'){pool.sort((a,b)=>b.lv-a.lv);}
-    else if(cfg.bal==='gender'||cfg.bal==='both'){const males=shuffle(pool.filter(p=>p.g==='M').sort((a,b)=>b.lv-a.lv));const females=shuffle(pool.filter(p=>p.g==='F').sort((a,b)=>b.lv-a.lv));const mixed=shuffle(pool.filter(p=>p.g==='X').sort((a,b)=>b.lv-a.lv));pool=[];const ml=Math.max(males.length,females.length,mixed.length);for(let i=0;i<ml;i++){if(i<males.length)pool.push(males[i]);if(i<females.length)pool.push(females[i]);if(i<mixed.length)pool.push(mixed[i]);}}
-    else pool=shuffle(pool);
-    const orderedIds=pool.map(p=>p.id);
-    const sched=[];let totalRelax=0;
-    // earlyPlayedInRound[r] = Set des joueurs ayant joué un match anticipé comptant pour le tour r
-    // Ces joueurs ne jouent PAS de match normal au tour r (le match anticipé est leur match)
-    const earlyPlayedInRound={};
+  // Trier par niveau pour équilibrer
+  const sorted=[...teams].sort((a,b)=>pLv(a)-pLv(b));
 
-    for(let r=0;r<R;r++){
-      // ── Remplaçants : 1) le moins de matchs joués, 2) le plus de byes déjà subis,
-      //    3) niveau le plus faible (débutants remplaçants en priorité), 4) aléatoire
-      let subs=[];
-      if(rem>0){
-        const sorted=[...orderedIds].sort((a,b)=>{
-          if(playCount[b]!==playCount[a])return playCount[b]-playCount[a];
-          if(byeCount[a]!==byeCount[b])return byeCount[a]-byeCount[b];
-          // priorité aux joueurs de plus faible niveau (débutants d'abord)
-          if(pLv(a)!==pLv(b))return pLv(a)-pLv(b);
-          return Math.random()-.5;
-        });
-        subs=sorted.slice(0,rem);
-      }
-      const subsSet=new Set(subs);subs.forEach(id=>byeCount[id]++);
-
-      // Joueurs ayant déjà joué leur match anticipé pour CE tour → exclus des vagues normales
-      const alreadyEarly=earlyPlayedInRound[r]||new Set();
-
-      // ── Tri des actifs pour minimiser l'attente :
-      // Les joueurs ayant joué en DERNIÈRE vague au tour précédent sont prioritaires
-      // pour jouer en PREMIÈRE vague à ce tour (ils ont attendu le plus longtemps).
-      const activeRaw=orderedIds.filter(id=>!subsSet.has(id)&&!alreadyEarly.has(id));
-      const active=shuffle(activeRaw).sort((a,b)=>lastWaveIdx[b]-lastWaveIdx[a]);
-
-      const waves=[];let offset=0;
-      for(let w=0;w<wavesPerRound;w++){
-        const wsize=waveSizes[w]||waveSizes[waveSizes.length-1];
-        const group=active.slice(offset,offset+wsize);offset+=wsize;
-        if(group.length<4)continue;
-        const ms=makeMatchesStrict(group,pairCount,oppCount,lastPartnerRound,r,cfg);
-        ms.forEach(m=>{if(m._relaxed)totalRelax++;});
-        // Mise à jour lastWaveIdx pour chaque joueur de cette vague
-        group.forEach(id=>{playCount[id]=(playCount[id]||0)+1;lastWaveIdx[id]=w;});
-        waves.push({matches:ms,waveIdx:w,waveTime:'',_isEarlyWave:false});
-      }
-
-      // ── Matchs anticipés (terrains libres) — désactivés si vagues forcées
-      // Règle absolue : un joueur qui joue un match anticipé pour le tour R+1
-      //   1. N'a PAS joué de match normal dans aucune vague du tour courant R
-      //   2. Ne jouera PAS de match normal au tour R+1 (son anticipé EST son match)
-      if(!forcedWaves && r+1<R){
-        // Tous les joueurs ayant joué dans n'importe quelle vague normale de ce tour
-        const alreadyPlayedThisRound=new Set(
-          waves.filter(wv=>!wv._isEarlyWave)
-               .flatMap(wv=>wv.matches.flatMap(m=>[m.pA1,m.pA2,m.pB1,m.pB2]))
-        );
-        // Préfigurer les remplaçants du tour suivant (pour ne pas les anticiper)
-        let futureSubs=new Set();
-        if(rem>0){
-          const sorted=[...orderedIds].sort((a,b)=>{
-            if(playCount[b]!==playCount[a])return playCount[b]-playCount[a];
-            if(byeCount[a]!==byeCount[b])return byeCount[a]-byeCount[b];
-            if(pLv(a)!==pLv(b))return pLv(a)-pLv(b);
-            return 0;
-          });
-          sorted.slice(0,rem).forEach(id=>futureSubs.add(id));
-        }
-        // Candidats globaux : n'ont PAS joué ce tour, ne sont pas remplaçants tour suivant
-        // et ne sont pas déjà retenus pour un autre anticipé ce tour
-        const globalEarlyUsed=new Set();
-        const normalWaves=waves.filter(wv=>!wv._isEarlyWave);
-        for(let nwi=0;nwi<normalWaves.length;nwi++){
-          const nw=normalWaves[nwi];
-          const freeSlots=T-nw.matches.length;if(freeSlots<=0)continue;
-          const candidates=shuffle(orderedIds.filter(id=>
-            !futureSubs.has(id) &&
-            !alreadyPlayedThisRound.has(id) &&
-            !globalEarlyUsed.has(id)
-          )).sort((a,b)=>lastWaveIdx[b]-lastWaveIdx[a]);
-          const earlyMatches=[];let ci=0;
-          for(let slot=0;slot<freeSlots&&ci+3<candidates.length;slot++){
-            const group=candidates.slice(ci,ci+4);ci+=4;if(group.length<4)break;
-            const ms=makeMatchesStrict(group,pairCount,oppCount,lastPartnerRound,r+1,cfg);
-            if(ms.length>0){
-              ms[0]._early=true;ms[0]._fromRound=r+1;ms[0]._parentWaveIdx=nwi;
-              if(ms[0]._relaxed)totalRelax++;
-              earlyMatches.push(ms[0]);
-              group.forEach(id=>{
-                globalEarlyUsed.add(id);
-                playCount[id]=(playCount[id]||0)+1;
-                lastWaveIdx[id]=nwi;
-                if(!earlyPlayedInRound[r+1]) earlyPlayedInRound[r+1]=new Set();
-                earlyPlayedInRound[r+1].add(id);
-              });
-            }
-          }
-          if(earlyMatches.length>0)waves.push({matches:earlyMatches,waveIdx:waves.length,waveTime:'',_isEarlyWave:true,_parentWaveIdx:nwi});
-        }
-      }
-      sched.push({waves,subs:[...subs],roundTime:cfg.start});
+  // Greedy pairing avec score
+  for(let i=0;i<sorted.length;i++){
+    if(used.has(sorted[i]))continue;
+    let bestJ=-1,bestScore=Infinity;
+    for(let j=i+1;j<sorted.length;j++){
+      if(used.has(sorted[j]))continue;
+      const k=pk2(sorted[i],sorted[j]);
+      const reps=oppCount[k]||0;
+      const lvDiff=Math.abs(pLv(sorted[i])-pLv(sorted[j]));
+      // Score : pénalité répétition + équilibre niveau + aléatoire léger
+      const score=reps*1000+lvDiff*10+Math.random()*5;
+      if(score<bestScore){bestScore=score;bestJ=j;}
     }
-    if(totalRelax<bestScore){bestScore=totalRelax;bestSched=sched;if(totalRelax===0)break;}
+    if(bestJ>=0){
+      matches.push({tA:sorted[i],tB:sorted[bestJ]});
+      used.add(sorted[i]);used.add(sorted[bestJ]);
+    }
+  }
+  return matches;
+}
+
+function pLv(id){const p=ST.teams.find(x=>x.id===id);return p?p.lv:3;}
+function pName(id){const p=ST.teams.find(x=>x.id===id);return p?p.name:'?';}
+
+function buildSchedule(){
+  const cfg=getCfg();
+  if(cfg.n<4){alert('Il faut au moins 4 équipes.');return false;}
+  ST.cfg=cfg;
+  const N=cfg.n,R=cfg.r;
+
+  // Répartition des équipes par salle (poules)
+  let teamsH1,teamsH2;
+  if(cfg.halls===2){
+    const sorted=[...ST.teams].sort((a,b)=>b.lv-a.lv);
+    // Serpentin : alterner salle 1 et salle 2 pour équilibrer les niveaux
+    teamsH1=[];teamsH2=[];
+    sorted.forEach((t,i)=>{ if(i%2===0)teamsH1.push(t.id); else teamsH2.push(t.id); });
+  } else {
+    teamsH1=ST.teams.slice(0,N).map(t=>t.id);
+    teamsH2=[];
   }
 
-  // ── Calcul des horaires avec coupure déjeuner ───────────
+  const oppCountH1={},oppCountH2={};
+  const sched=[];
+
+  // Calcul horaires
   const morningRounds=cfg.matchesMorning||Math.ceil(R/2);
   let currentTime=cfg.start;
   let afternoonStarted=false;
-  bestSched.forEach((rd,ri)=>{
-    // Basculement matin → après-midi
-    if(ri===morningRounds && !afternoonStarted){
+  const waveDurH1=cfg.waves1*cfg.mt+(cfg.waves1-1)*cfg.tt;
+  const waveDurH2=cfg.halls===2?cfg.waves2*cfg.mt+(cfg.waves2-1)*cfg.tt:0;
+  const roundDur=Math.max(waveDurH1,waveDurH2);
+
+  for(let r=0;r<R;r++){
+    if(r===morningRounds&&!afternoonStarted){
       afternoonStarted=true;
-      if(cfg.lunchBreak){
-        // On repart de lunchStart + lunchDuration
-        const ls=cfg.lunchStart||'12:30';
-        currentTime=addMinutes(ls,cfg.lunchDuration||60);
-      }
-      // Sinon currentTime reste là où on en est
+      if(cfg.lunchBreak){ currentTime=addMinutes(cfg.lunchStart||'12:30',cfg.lunchDuration||60); }
     }
-    // Session marker pour affichage
-    rd.session=ri<morningRounds?'morning':'afternoon';
-    rd.roundTime=currentTime;
-    const normalWaves=rd.waves.filter(wv=>!wv._isEarlyWave);const normalWaveTimes=[];let wt=currentTime;
-    normalWaves.forEach((wv,i)=>{wv.waveTime=wt;normalWaveTimes.push(wt);if(i<normalWaves.length-1)wt=addMinutes(wt,cfg.mt+cfg.tt);});
-    rd.waves.filter(wv=>wv._isEarlyWave).forEach(wv=>{const parentIdx=wv._parentWaveIdx!=null?wv._parentWaveIdx:normalWaveTimes.length-1;wv.waveTime=normalWaveTimes[parentIdx]||currentTime;});
-    const normalWaveCount=normalWaves.length;const roundDur=normalWaveCount*cfg.mt+(normalWaveCount-1)*cfg.tt;
-    currentTime=addMinutes(currentTime,roundDur+(ri<bestSched.length-1?cfg.tp:0));
-  });
-  ST.schedule=bestSched;ST.results={};ST.activeRound=0;return true;
+
+    const roundH1=buildRoundForHall(teamsH1,cfg.t1,cfg.waves1,oppCountH1,r);
+    const roundH2=cfg.halls===2?buildRoundForHall(teamsH2,cfg.t2,cfg.waves2,oppCountH2,r):{waves:[],subs:[]};
+
+    // Attacher les horaires aux vagues
+    let wt=currentTime;
+    const wavesH1WithTime=roundH1.waves.map((wv,wi)=>{
+      const t=wt; if(wi<roundH1.waves.length-1)wt=addMinutes(wt,cfg.mt+cfg.tt); return{matches:wv,waveTime:t,hall:1,waveIdx:wi};
+    });
+    wt=currentTime;
+    const wavesH2WithTime=roundH2.waves.map((wv,wi)=>{
+      const t=wt; if(wi<roundH2.waves.length-1)wt=addMinutes(wt,cfg.mt+cfg.tt); return{matches:wv,waveTime:t,hall:2,waveIdx:wi};
+    });
+
+    sched.push({
+      roundTime:currentTime,
+      session:r<morningRounds?'morning':'afternoon',
+      wavesH1:wavesH1WithTime,
+      wavesH2:wavesH2WithTime,
+      subsH1:roundH1.subs,
+      subsH2:roundH2.subs
+    });
+
+    currentTime=addMinutes(currentTime,roundDur+(r<R-1?cfg.tp:0));
+  }
+
+  ST.schedule=sched;ST.results={};ST.activeRound=0;
+  return true;
 }
 
 window.regenerateLocal = async function(){
-  if(buildSchedule()){
-    await saveTournament({ schedule: ST.schedule, activeRound: 0 });
-    renderGen();
-  }
+  if(buildSchedule()){ await saveTournament({schedule:ST.schedule,activeRound:0}); renderGen(); }
 };
 
 // ══════════════════════════════════════════════════════════
 // PAGE 3 — PLANNING PREVIEW
 // ══════════════════════════════════════════════════════════
-function pName(id){const p=(ST.teams.length?ST.teams:ST.players).find(x=>x.id===id);return p?p.name:'?';}
-function pObj(id){return ST.players.find(x=>x.id===id);}
-
 function renderGen(){
-  const {n,t,r,mt,tt,tp,start}=ST.cfg;const p=computeScheduleParams(ST.cfg);
-  // playCount : chaque joueur doit jouer exactement r matchs (les anticipés remplacent un match normal)
-  // On compte tous les matchs de toutes les vagues — chaque apparition = 1 match joué
-  const playCount={};ST.players.slice(0,n).forEach(pl=>playCount[pl.id]=0);
-  ST.schedule.forEach(rd=>rd.waves.forEach(wv=>wv.matches.forEach(m=>[m.pA1,m.pA2,m.pB1,m.pB2].forEach(id=>{playCount[id]=(playCount[id]||0)+1;}))));
-  const pVals=Object.values(playCount);const maxPlay=Math.max(...pVals),minPlay=Math.min(...pVals);
-  const pCnt={};let dupCount=0;
-  ST.schedule.forEach(rd=>rd.waves.forEach(wv=>wv.matches.forEach(m=>{[[m.pA1,m.pA2],[m.pB1,m.pB2]].forEach(([a,b])=>{const k=pk(a,b);pCnt[k]=(pCnt[k]||0)+1;if(pCnt[k]===2)dupCount++;});})));
-  const totalMatches=ST.schedule.reduce((s,rd)=>rd.waves.reduce((s2,wv)=>s2+wv.matches.length,s),0);
-  const lastRound=ST.schedule[ST.schedule.length-1];const lastWave=lastRound.waves[lastRound.waves.length-1];const endTime=addMinutes(lastWave.waveTime,mt);
-  const gib=document.getElementById('genInfoBox');
-  if(gib){gib.className='info info-g';gib.innerHTML=`✅ <strong>${n} joueurs</strong> · <strong>${t} terrains</strong> · <strong>${r} tours</strong> · ${p.wavesPerRound} vague${p.wavesPerRound>1?'s':''}/tour<br>Matchs/joueur : <strong>${minPlay}–${maxPlay}</strong>${p.rem>0?` · <strong>${p.rem} remplaçant${p.rem>1?'s':''}</strong>`:'· <strong>Tous jouent</strong>'}<br>Total matchs : <strong>${totalMatches}</strong> · Début : <strong>${start}</strong> → Fin : <strong>${endTime}</strong>`;}
-  let totalLvDiff=0,matchCount=0,earlyCount=0,relaxCount=0;
-  ST.schedule.forEach(rd=>rd.waves.forEach(wv=>{if(wv._isEarlyWave)earlyCount+=wv.matches.length;wv.matches.forEach(m=>{if(m._relaxed)relaxCount++;const lvA=pLv(m.pA1)+pLv(m.pA2),lvB=pLv(m.pB1)+pLv(m.pB2);totalLvDiff+=Math.abs(lvA-lvB);matchCount++;});}));
-  const avgLvDiff=matchCount>0?(totalLvDiff/matchCount).toFixed(2):0;
+  const N=ST.cfg.n,T=ST.cfg.halls===2?(ST.cfg.t1||8)+'+'+(ST.cfg.t2||5):ST.cfg.t1||8,R=ST.cfg.r;
+  // Compte de matchs joués par équipe
+  const playCount={};ST.teams.forEach(t=>playCount[t.id]=0);
+  ST.schedule.forEach(rd=>{
+    [...(rd.wavesH1||[]),...(rd.wavesH2||[])].forEach(wv=>{
+      wv.matches.forEach(m=>{playCount[m.tA]=(playCount[m.tA]||0)+1;playCount[m.tB]=(playCount[m.tB]||0)+1;});
+    });
+  });
+  const pVals=Object.values(playCount);
+  const maxPlay=pVals.length?Math.max(...pVals):0,minPlay=pVals.length?Math.min(...pVals):0;
+  const totalMatches=ST.schedule.reduce((s,rd)=>[...(rd.wavesH1||[]),...(rd.wavesH2||[])].reduce((s2,wv)=>s2+wv.matches.length,s),0);
 
-  // ── Analyse de l'attente maximale entre 2 matchs consécutifs d'un même joueur
-  // On reconstruit la séquence de vagues (tour*wavesPerRound + waveIdx) pour chaque joueur
-  let maxWait=0, waitViolations=0;
-  if(p.wavesPerRound>1){
-    const playerSeq={}; // id → [globalWaveIndex, ...]
-    ST.players.slice(0,n).forEach(pl=>playerSeq[pl.id]=[]);
-    let globalWave=0;
-    ST.schedule.forEach((rd,ri)=>{
-      const normalWvs=rd.waves.filter(wv=>!wv._isEarlyWave);
-      normalWvs.forEach((wv,wi)=>{
-        const gw=ri*p.wavesPerRound+wi;
-        wv.matches.forEach(m=>[m.pA1,m.pA2,m.pB1,m.pB2].forEach(id=>{if(playerSeq[id])playerSeq[id].push(gw);}));
-      });
-      rd.waves.filter(wv=>wv._isEarlyWave).forEach(wv=>{
-        const parentWi=wv._parentWaveIdx!=null?wv._parentWaveIdx:0;
-        const gw=ri*p.wavesPerRound+parentWi;
-        wv.matches.forEach(m=>[m.pA1,m.pA2,m.pB1,m.pB2].forEach(id=>{if(playerSeq[id])playerSeq[id].push(gw);}));
-      });
-    });
-    Object.values(playerSeq).forEach(seq=>{
-      const sorted=[...new Set(seq)].sort((a,b)=>a-b);
-      for(let i=1;i<sorted.length;i++){
-        const wait=sorted[i]-sorted[i-1]-1;
-        if(wait>maxWait)maxWait=wait;
-        if(wait>1)waitViolations++;
-      }
-    });
+  const gib=document.getElementById('genInfoBox');
+  if(gib){
+    gib.className='info info-g';
+    gib.innerHTML=`✅ <strong>${N} équipes</strong> · <strong>${T} terrains</strong> · <strong>${R} tours</strong><br>`
+      +`Matchs/équipe : <strong>${minPlay}–${maxPlay}</strong> · Total matchs : <strong>${totalMatches}</strong>`;
   }
-  const waitOk=p.wavesPerRound<=1||maxWait<=1;
+
+  // Vérification doublons adversaires
+  const oppCount={};let dups=0;
+  ST.schedule.forEach(rd=>{
+    [...(rd.wavesH1||[]),...(rd.wavesH2||[])].forEach(wv=>{
+      wv.matches.forEach(m=>{const k=pk2(m.tA,m.tB);oppCount[k]=(oppCount[k]||0)+1;if(oppCount[k]===2)dups++;});
+    });
+  });
 
   const ccb=document.getElementById('ccBox');
-  if(ccb)ccb.innerHTML=`
-    <div class="cc-row"><span class="cc-ico">${p.rem===0?'✅':'ℹ️'}</span><span class="cc-lbl">Tous jouent à chaque tour</span><span class="cc-badge ${p.rem===0?'ccb-ok':'ccb-info'}">${p.rem===0?'Oui':p.rem+' remplaçant(s)/tour'}</span></div>
-    <div class="cc-row"><span class="cc-ico">🏟️</span><span class="cc-lbl">Terrains libres → matchs anticipés</span><span class="cc-badge ${earlyCount>0?'ccb-info':'ccb-ok'}">${earlyCount>0?earlyCount+' match(s) anticipés':'Aucun terrain libre'}</span></div>
-    <div class="cc-row"><span class="cc-ico">${dupCount===0?'✅':'⚠️'}</span><span class="cc-lbl">Partenaires uniques</span><span class="cc-badge ${dupCount===0?'ccb-ok':'ccb-warn'}">${dupCount===0?'Aucun doublon':dupCount+' doublon(s)'}</span></div>
-    <div class="cc-row"><span class="cc-ico">${relaxCount===0?'✅':'⚠️'}</span><span class="cc-lbl">Contraintes adv. / cooldown</span><span class="cc-badge ${relaxCount===0?'ccb-ok':'ccb-warn'}">${relaxCount===0?'Toutes respectées':relaxCount+' relâché(s)'}</span></div>
+  if(ccb) ccb.innerHTML=`
     <div class="cc-row"><span class="cc-ico">${maxPlay-minPlay<=1?'✅':'⚠️'}</span><span class="cc-lbl">Équité matchs joués</span><span class="cc-badge ${maxPlay-minPlay<=1?'ccb-ok':'ccb-warn'}">${minPlay}–${maxPlay} matchs</span></div>
-    ${p.wavesPerRound>1?`<div class="cc-row"><span class="cc-ico">${waitOk?'✅':'⚠️'}</span><span class="cc-lbl">Attente max entre 2 matchs</span><span class="cc-badge ${waitOk?'ccb-ok':'ccb-warn'}">${p.wavesPerRound<=1?'N/A (1 vague)':waitOk?'≤ 1 vague ✓':maxWait+' vague(s) — '+waitViolations+' cas'}</span></div>`:''}
-    <div class="cc-row"><span class="cc-ico">${+avgLvDiff<1?'✅':+avgLvDiff<2?'ℹ️':'⚠️'}</span><span class="cc-lbl">Équilibre niveau</span><span class="cc-badge ${+avgLvDiff<1?'ccb-ok':+avgLvDiff<2?'ccb-info':'ccb-warn'}">${avgLvDiff} étoile(s)/match</span></div>
-    <div class="cc-row"><span class="cc-ico">✅</span><span class="cc-lbl">Horaires</span><span class="cc-badge ccb-info">${start} → ${endTime}</span></div>`;
+    <div class="cc-row"><span class="cc-ico">${dups===0?'✅':'⚠️'}</span><span class="cc-lbl">Adversaires uniques</span><span class="cc-badge ${dups===0?'ccb-ok':'ccb-warn'}">${dups===0?'Aucun doublon':dups+' doublon(s)'}</span></div>
+    <div class="cc-row"><span class="cc-ico">🏟️</span><span class="cc-lbl">Total matchs</span><span class="cc-badge ccb-info">${totalMatches}</span></div>`;
+
   const sp=document.getElementById('schedPreview');if(!sp)return;
   sp.innerHTML=ST.schedule.map((rd,ri)=>{
-    const sortedWaves=[];const normalWvs=rd.waves.filter(wv=>!wv._isEarlyWave);
-    normalWvs.forEach((nw,nwi)=>{sortedWaves.push({wv:nw,wi:rd.waves.indexOf(nw)});rd.waves.filter(wv=>wv._isEarlyWave&&(wv._parentWaveIdx===nwi||(wv._parentWaveIdx==null&&nwi===normalWvs.length-1))).forEach(ew=>sortedWaves.push({wv:ew,wi:rd.waves.indexOf(ew)}));});
-    return `<div class="round-block"><div class="round-hdr"><span class="round-hdr-ttl">🎯 Tour ${ri+1}</span><span class="round-time-badge">🕐 ${rd.roundTime}</span>${rd.subs.length?`<span class="sub-badge">🟡 ${rd.subs.map(id=>pName(id)).join(', ')}</span>`:'<span style="font-size:11px;color:var(--grn);font-weight:700">✅ Tous jouent</span>'}<span style="font-size:11px;color:var(--muted);margin-left:auto">${rd.waves.reduce((s,wv)=>s+wv.matches.length,0)} matchs</span></div>${sortedWaves.map(({wv,wi})=>`<div class="wave-block${wv._isEarlyWave?' wave-early':''}"><div class="wave-hdr">${wv._isEarlyWave?`<span>⚡ Vague ${wv._parentWaveIdx!=null?wv._parentWaveIdx+1:'?'}b — <span class="early-tag">Anticipé Tour ${ri+2}</span></span>`:(normalWvs.length>1?`<span>Vague ${normalWvs.indexOf(wv)+1}</span>`:'<span>Matchs</span>')}<span class="wave-time">⏰ ${wv.waveTime}</span><span style="color:var(--dim);font-size:10px">${wv.matches.length} terrain${wv.matches.length>1?'s':''}</span></div>${wv.matches.map((m,mi)=>`<div class="rp-match${m._early?' rp-early':''}${m._relaxed?' rp-relaxed':''}"><span class="rp-court">T${mi+1}</span><span class="rp-pair">${pName(m.pA1)} <span style="color:var(--grn)">+</span> ${pName(m.pA2)}</span><span class="rp-vs">VS</span><span class="rp-pair">${pName(m.pB1)} <span style="color:var(--grn)">+</span> ${pName(m.pB2)}</span></div>`).join('')}</div>`).join('')}</div>`;
+    const allSubs=[...(rd.subsH1||[]),...(rd.subsH2||[])];
+    let html=`<div class="round-block"><div class="round-hdr">
+      <span class="round-hdr-ttl">🎯 Tour ${ri+1}</span>
+      <span class="round-time-badge">🕐 ${rd.roundTime}</span>
+      ${allSubs.length?`<span class="sub-badge">🟡 Exempts: ${allSubs.map(id=>pName(id)).join(', ')}</span>`:'<span style="font-size:11px;color:var(--grn);font-weight:700">✅ Tous jouent</span>'}
+    </div>`;
+    // Salle 1
+    if(rd.wavesH1&&rd.wavesH1.length){
+      html+=`<div class="hall-block"><div class="hall-hdr">🏠 Salle 1</div>`;
+      rd.wavesH1.forEach((wv,wi)=>{
+        html+=`<div class="wave-block"><div class="wave-hdr"><span>Vague ${wi+1}</span><span class="wave-time">⏰ ${wv.waveTime}</span></div>`;
+        wv.matches.forEach((m,mi)=>{
+          html+=`<div class="rp-match"><span class="rp-court">T${mi+1}</span><span class="rp-pair">${pName(m.tA)}</span><span class="rp-vs">VS</span><span class="rp-pair">${pName(m.tB)}</span></div>`;
+        });
+        html+=`</div>`;
+      });
+      if(rd.subsH1&&rd.subsH1.length) html+=`<div style="padding:6px 14px;font-size:11px;color:var(--ylw)">🟡 Exempte(s) salle 1 : ${rd.subsH1.map(id=>pName(id)).join(', ')}</div>`;
+      html+=`</div>`;
+    }
+    // Salle 2
+    if(rd.wavesH2&&rd.wavesH2.length){
+      html+=`<div class="hall-block hall-block-2"><div class="hall-hdr">🏠 Salle 2</div>`;
+      rd.wavesH2.forEach((wv,wi)=>{
+        html+=`<div class="wave-block"><div class="wave-hdr"><span>Vague ${wi+1}</span><span class="wave-time">⏰ ${wv.waveTime}</span></div>`;
+        wv.matches.forEach((m,mi)=>{
+          html+=`<div class="rp-match"><span class="rp-court">T${mi+1}</span><span class="rp-pair">${pName(m.tA)}</span><span class="rp-vs">VS</span><span class="rp-pair">${pName(m.tB)}</span></div>`;
+        });
+        html+=`</div>`;
+      });
+      if(rd.subsH2&&rd.subsH2.length) html+=`<div style="padding:6px 14px;font-size:11px;color:var(--ylw)">🟡 Exempte(s) salle 2 : ${rd.subsH2.map(id=>pName(id)).join(', ')}</div>`;
+      html+=`</div>`;
+    }
+    html+=`</div>`;
+    return html;
   }).join('');
 }
 
 // ══════════════════════════════════════════════════════════
 // PAGE 4 — TOURNOI
 // ══════════════════════════════════════════════════════════
-function renderTournament(){ renderRoundTabs();renderMatches();renderSubInfo();renderMiniStandings();updateTimerDisplay();checkDone(); }
+window.startTournament = async function(){
+  if(!isAdmin())return;
+  if(!ST.schedule||ST.schedule.length===0){ if(!buildSchedule())return; }
+  ST.results={};ST.activeRound=0;
+  await saveTournament({schedule:ST.schedule,activeRound:0,status:'active',results:{}});
+  goTo(4);
+};
+window.newTournament = async function(){
+  if(!isAdmin()){alert('Admin uniquement.');return;}
+  if(!confirm('Nouveau tournoi ? Toutes les données seront perdues.'))return;
+  clearInterval(ST.timerIv);
+  ST.teams=[];ST.schedule=[];ST.results={};ST.activeRound=0;
+  ST.timerSec=0;ST.timerRun=false;ST.rulesOpen=false;
+  document.getElementById('ruleBtn').textContent='📋 Règlement';
+  await saveTournament({cfg:ST.cfg,teams:[],schedule:[],activeRound:0,status:'setup'});
+  renderPlayers();goTo(1);onCfgChange();
+};
+window.resetAllScores = async function(){
+  if(!isAdmin()){alert('Admin uniquement.');return;}
+  if(!confirm('Réinitialiser TOUS les scores ?'))return;
+  try{
+    const{getDocs,collection:col2,deleteDoc:delDoc2,doc:doc2}=await import('https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js');
+    const snap=await getDocs(col2(db,'interclub_results'));
+    await Promise.all(snap.docs.map(d=>delDoc2(doc2(db,'interclub_results',d.id))));
+    ST.results={}; await auditLog('reset_all_scores',{count:snap.size}); renderTournament();
+  }catch(e){alert('Erreur : '+e.message);}
+};
+
+function renderTournament(){renderRoundTabs();renderMatches();renderSubInfo();renderMiniStandings();updateTimerDisplay();checkDone();}
 
 function renderRoundTabs(){
   const el=document.getElementById('rTabs');if(!el)return;
@@ -1608,140 +934,111 @@ function renderRoundTabs(){
   }).join('');
 }
 
-function isRoundDone(r){const rd=ST.schedule[r];if(!rd)return false;return rd.waves.every((wv,w)=>wv.matches.every((_,m)=>{const res=getRes(r,w,m);return res.ga!==''&&res.gb!=='';}));}
+// Clé de résultat : "r-hallIdx-waveIdx-matchIdx"
+// hallIdx: 1 ou 2
+function matchKey(r,hall,w,m){return `${r}-h${hall}-${w}-${m}`;}
+
+function isRoundDone(r){
+  const rd=ST.schedule[r];if(!rd)return false;
+  const allWaves=[...(rd.wavesH1||[]).map((wv,wi)=>({wv,wi,hall:1})),...(rd.wavesH2||[]).map((wv,wi)=>({wv,wi,hall:2}))];
+  return allWaves.every(({wv,wi,hall})=>wv.matches.every((_,mi)=>{const res=getRes(matchKey(r,hall,wi,mi));return res.ga!==''&&res.gb!=='';}));
+}
 function allDone(){return ST.schedule.every((_,r)=>isRoundDone(r));}
 function checkDone(){const el=document.getElementById('btnFinDiv');if(el)el.style.display=allDone()?'':'none';}
 
 function renderSubInfo(){
   const rd=ST.schedule[ST.activeRound];const el=document.getElementById('subRoundInfo');if(!el)return;
-  if(!rd||!rd.subs.length){el.innerHTML='';return;}
-  el.innerHTML=`<div class="info info-y">🟡 <strong>Remplaçant${rd.subs.length>1?'s':''} ce tour :</strong> ${rd.subs.map(id=>pName(id)).join(' · ')}</div>`;
+  const allSubs=[...(rd?.subsH1||[]),...(rd?.subsH2||[])];
+  if(!rd||!allSubs.length){el.innerHTML='';return;}
+  el.innerHTML=`<div class="info info-y">🟡 <strong>Exempte(s) ce tour :</strong> ${allSubs.map(id=>pName(id)).join(' · ')}</div>`;
 }
 
 function renderMatches(){
   const round=ST.schedule[ST.activeRound];const el=document.getElementById('mList');if(!round||!el)return;
-  const mkP=(id)=>{const p=pObj(id);const idx=ST.players.findIndex(x=>x.id===id);return p?`<span data-playeridx="${idx}">${p.name}</span>`:'?';};
-  // Bouton substitution uniquement pour admin
-  const mkSubBtn=(id)=>isAdmin()?`<button class="psub-btn" title="Remplacer ce joueur" onclick="openSub('${id}')">↔</button>`:'';
-  // Bouton édition nom visible pour scorer+admin (en mode tournoi)
-  const mkEditBtn=(id,idx)=>isScorer()?`<button class="pedit" title="Modifier le nom" onclick="editPlayerName(${idx})">✏️</button>`:'';
-  const normalRdWaves=round.waves.filter(wv=>!wv._isEarlyWave);
-  const sortedRdWaves=[];
-  normalRdWaves.forEach((nw,nwi)=>{
-    sortedRdWaves.push({wv:nw,wi:round.waves.indexOf(nw)});
-    round.waves.filter(wv=>wv._isEarlyWave&&(wv._parentWaveIdx===nwi||(wv._parentWaveIdx==null&&nwi===normalRdWaves.length-1))).forEach(ew=>sortedRdWaves.push({wv:ew,wi:round.waves.indexOf(ew)}));
-  });
-  el.innerHTML=sortedRdWaves.map(({wv,wi})=>`
-    <div class="wave-sep${wv._isEarlyWave?' wave-sep-early':''}">
-      <span class="wave-sep-lbl">${wv._isEarlyWave?`⚡ Vague ${wv._parentWaveIdx!=null?wv._parentWaveIdx+1:'?'}b — <span class="early-badge">Anticipé Tour ${ST.activeRound+2}</span>`:(normalRdWaves.length>1?`⚡ Vague ${normalRdWaves.indexOf(wv)+1}`:'⚡ Matchs')}</span>
-      <span class="wave-time-lbl">🕐 ${wv.waveTime}</span>
-      <span style="margin-left:auto;font-size:11px;color:var(--muted)">${wv.matches.length} terrain${wv.matches.length>1?'s':''}</span>
-    </div>
-    ${wv.matches.map((m,mi)=>{
-      const res=getRes(ST.activeRound,wi,mi);const done=res.ga!==''&&res.gb!=='';
-      const aW=done&&res.ga>res.gb,bW=done&&res.gb>res.ga;const isEarly=m._early;
-      const idxA1=ST.players.findIndex(p=>p.id===m.pA1);
-      const idxA2=ST.players.findIndex(p=>p.id===m.pA2);
-      const idxB1=ST.players.findIndex(p=>p.id===m.pB1);
-      const idxB2=ST.players.findIndex(p=>p.id===m.pB2);
-      return `<div class="mc ${done?'done-mc':''} ${isEarly?'mc-early':''}">
-        <div>
-          <div class="mt-court">TERRAIN ${mi+1}${isEarly?` <span class="early-badge">↗ Tour ${m._fromRound+1}</span>`:''}</div>
-          <div class="mt-nm">${mkP(m.pA1)} <span style="color:var(--grn);font-size:13px">+</span> ${mkP(m.pA2)}</div>
-          <div class="mt-detail">${mkSubBtn(m.pA1)} ${mkEditBtn(m.pA1,idxA1)} ${mkP(m.pA1)} &nbsp;·&nbsp; ${mkSubBtn(m.pA2)} ${mkEditBtn(m.pA2,idxA2)} ${mkP(m.pA2)}</div>
-        </div>
-        <input type="text" inputmode="numeric" pattern="[0-9]*" maxlength="2"
-          class="sinp ${aW?'win-s':''}" value="${res.ga!==''?res.ga:''}" placeholder="–"
-          autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
-          ${isScorer()?`
-            onfocus="scoreFocus(this)"
-            oninput="scoreInput(this,${ST.activeRound},${wi},${mi},'ga')"
-            onkeydown="scoreNav(event,this)"
-          `:'readonly'}
-          style="${!isScorer()?'cursor:default;opacity:.6':''}"
-          data-rid="${ST.activeRound}" data-wi="${wi}" data-mi="${mi}" data-field="ga" data-match="${ST.activeRound}-${wi}-${mi}">
-        <div class="vs-lbl">VS</div>
-        <input type="text" inputmode="numeric" pattern="[0-9]*" maxlength="2"
-          class="sinp ${bW?'win-s':''}" value="${res.gb!==''?res.gb:''}" placeholder="–"
-          autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
-          ${isScorer()?`
-            onfocus="scoreFocus(this)"
-            oninput="scoreInput(this,${ST.activeRound},${wi},${mi},'gb')"
-            onkeydown="scoreNav(event,this)"
-          `:'readonly'}
-          style="${!isScorer()?'cursor:default;opacity:.6':''}"
-          data-rid="${ST.activeRound}" data-wi="${wi}" data-mi="${mi}" data-field="gb" data-match="${ST.activeRound}-${wi}-${mi}">
-        <div class="mt-r">
-          <div class="mt-court">TERRAIN ${mi+1}</div>
-          <div class="mt-nm">${mkP(m.pB1)} <span style="color:var(--grn);font-size:13px">+</span> ${mkP(m.pB2)}</div>
-          <div class="mt-detail">${mkP(m.pB1)} ${mkSubBtn(m.pB1)} ${mkEditBtn(m.pB1,idxB1)} &nbsp;·&nbsp; ${mkP(m.pB2)} ${mkSubBtn(m.pB2)} ${mkEditBtn(m.pB2,idxB2)}</div>
-        </div>
-      </div>`;
-    }).join('')}`).join('');
-}
+  const r=ST.activeRound;
 
-// ══════════════════════════════════════════════════════════
-// SUBSTITUTION UI (admin uniquement)
-// ══════════════════════════════════════════════════════════
-window.openSub = function(playerId){
-  if(!isAdmin()){ alert("Les substitutions sont réservées à l'admin."); return; }
-  ST.sub={targetId:playerId,selId:null};
-  const p=pObj(playerId);
-  document.getElementById('subDesc').innerHTML=`Remplacer <strong>${p?p.name:'?'}</strong> à partir du <strong>tour ${ST.activeRound+1}</strong>.<br>Les scores des matchs déjà joués restent inchangés.`;
-  const rd=ST.schedule[ST.activeRound];
-  const inRound=rd?rd.waves.flatMap(wv=>wv.matches.flatMap(m=>[m.pA1,m.pA2,m.pB1,m.pB2])):[];
-  const available=ST.players.filter(pl=>pl.id!==playerId&&!inRound.includes(pl.id));
-  document.getElementById('subList').innerHTML=available.length
-    ?available.map(pl=>`<div class="sub-item" onclick="selectSub('${pl.id}',this)"><span>${pl.g==='M'?'♂':pl.g==='F'?'♀':'⚧'}</span><span style="flex:1;font-weight:600">${pl.name}</span><span class="tag tag-${pl.g}">${pl.g}</span><span class="p-lvl">${'★'.repeat(pl.lv)}</span></div>`).join('')
-    :'<div class="txt-muted" style="padding:8px">Aucun remplaçant disponible.</div>';
-  document.getElementById('subModal').classList.add('open');
-};
-window.selectSub = function(id,el){
-  ST.sub.selId=id;
-  document.querySelectorAll('.sub-item').forEach(x=>x.classList.remove('sel'));
-  el.classList.add('sel');
-};
-window.closeSubModal = function(){ document.getElementById('subModal').classList.remove('open'); };
-document.addEventListener('DOMContentLoaded',()=>{
-  document.getElementById('subModal').addEventListener('click',e=>{if(e.target===document.getElementById('subModal'))closeSubModal();});
-});
+  const renderHall=(waves,hall,hallLabel)=>{
+    if(!waves||!waves.length)return'';
+    const hallSubs=hall===1?(round.subsH1||[]):(round.subsH2||[]);
+    let html=`<div class="hall-section">`;
+    if(ST.cfg.halls===2){
+      html+=`<div class="hall-section-hdr"><span>🏠 ${hallLabel}</span>`;
+      if(hallSubs.length) html+=`<span class="sub-badge">🟡 Exempt${hallSubs.length>1?'s':''}: ${hallSubs.map(id=>pName(id)).join(', ')}</span>`;
+      html+=`</div>`;
+    }
+    waves.forEach((wv,wi)=>{
+      if(waves.length>1){
+        html+=`<div class="wave-sep"><span class="wave-sep-lbl">⚡ Vague ${wi+1}</span><span class="wave-time-lbl">🕐 ${wv.waveTime}</span><span style="margin-left:auto;font-size:11px;color:var(--muted)">${wv.matches.length} terrain${wv.matches.length>1?'s':''}</span></div>`;
+      }
+      wv.matches.forEach((m,mi)=>{
+        const key=matchKey(r,hall,wi,mi);
+        const res=getRes(key);const done=res.ga!==''&&res.gb!=='';
+        const aW=done&&res.ga>res.gb,bW=done&&res.gb>res.ga;
+        html+=`<div class="mc ${done?'done-mc':''}">
+          <div>
+            <div class="mt-court">TERRAIN ${mi+1}${ST.cfg.halls===2?' — '+hallLabel:''}</div>
+            <div class="mt-nm">${pName(m.tA)}</div>
+          </div>
+          <input type="text" inputmode="numeric" pattern="[0-9]*" maxlength="2"
+            class="sinp ${aW?'win-s':''}" value="${res.ga!==''?res.ga:''}" placeholder="–"
+            autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+            ${isScorer()?`onfocus="scoreFocus(this)" oninput="scoreInput(this,'${key}','ga')" onkeydown="scoreNav(event,this)"`:' readonly'}
+            style="${!isScorer()?'cursor:default;opacity:.6':''}"
+            data-key="${key}" data-field="ga">
+          <div class="vs-lbl">VS</div>
+          <input type="text" inputmode="numeric" pattern="[0-9]*" maxlength="2"
+            class="sinp ${bW?'win-s':''}" value="${res.gb!==''?res.gb:''}" placeholder="–"
+            autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+            ${isScorer()?`onfocus="scoreFocus(this)" oninput="scoreInput(this,'${key}','gb')" onkeydown="scoreNav(event,this)"`:' readonly'}
+            style="${!isScorer()?'cursor:default;opacity:.6':''}"
+            data-key="${key}" data-field="gb">
+          <div class="mt-r">
+            <div class="mt-court">TERRAIN ${mi+1}</div>
+            <div class="mt-nm">${pName(m.tB)}</div>
+          </div>
+        </div>`;
+      });
+    });
+    html+=`</div>`;
+    return html;
+  };
+
+  el.innerHTML=renderHall(round.wavesH1,1,'Salle 1')+renderHall(round.wavesH2,2,'Salle 2');
+}
 
 // ══════════════════════════════════════════════════════════
 // CLASSEMENT
 // ══════════════════════════════════════════════════════════
 function computeStandings(){
   const stats={};
-  ST.teams.forEach(t=>{
-    stats[t.id]={id:t.id,name:t.name,club:t.club||'—',lv:t.lv,p1:t.p1||'',p2:t.p2||'',
-      pts:0,w:0,d:0,l:0,gf:0,ga:0,played:0,byeTours:0,h2h:{}};
-  });
+  ST.teams.forEach(t=>{stats[t.id]={id:t.id,name:t.name,club:t.club||'—',lv:t.lv,p1:t.p1||'',p2:t.p2||'',pts:0,w:0,d:0,l:0,gf:0,ga:0,played:0,byeTours:0,h2h:{}};});
   ST.schedule.forEach((rd,ri)=>{
-    // Byes : 2pts si le round a au moins un score
-    const roundHasScores=rd.waves.some(wv=>wv.matches.some((_,mi)=>{
-      const res=getRes(ri,rd.waves.indexOf(wv),mi);return res.ga!==''||res.gb!=='';
-    }));
+    const roundHasScores=[...(rd.wavesH1||[]),...(rd.wavesH2||[])].some((wv,wi)=>wv.matches.some((_,mi)=>{const res=getRes(matchKey(ri,wv.hall||1,wi,mi));return res.ga!==''||res.gb!=='';}));
     if(roundHasScores){
-      rd.subs.forEach(id=>{if(stats[id]){stats[id].byeTours++;stats[id].pts+=2;stats[id].d++;stats[id].played++;}});
+      [...(rd.subsH1||[]),...(rd.subsH2||[])].forEach(id=>{if(stats[id]){stats[id].byeTours++;stats[id].pts+=2;stats[id].d++;stats[id].played++;}});
     }
-    rd.waves.forEach((wv,wi)=>{
-      wv.matches.forEach((m,mi)=>{
-        const res=getRes(ri,wi,mi);
-        if(res.ga===''||res.gb==='') return;
-        const ga=+res.ga,gb=+res.gb;
-        // En interclub : pA1 = équipe A, pB1 = équipe B
-        const sA=stats[m.pA1],sB=stats[m.pB1];
-        if(!sA||!sB) return;
-        sA.gf+=ga;sA.ga+=gb;sA.played++;
-        sB.gf+=gb;sB.ga+=ga;sB.played++;
-        if(ga>gb){sA.pts+=3;sA.w++;sB.l++;}
-        else if(gb>ga){sB.pts+=3;sB.w++;sA.l++;}
-        else{sA.pts+=2;sA.d++;sB.pts+=2;sB.d++;}
-        if(!sA.h2h[m.pB1])sA.h2h[m.pB1]={gf:0,ga:0};
-        sA.h2h[m.pB1].gf+=ga;sA.h2h[m.pB1].ga+=gb;
-        if(!sB.h2h[m.pA1])sB.h2h[m.pA1]={gf:0,ga:0};
-        sB.h2h[m.pA1].gf+=gb;sB.h2h[m.pA1].ga+=ga;
+    const processWaves=(waves,hall)=>{
+      (waves||[]).forEach((wv,wi)=>{
+        wv.matches.forEach((m,mi)=>{
+          const key=matchKey(ri,hall,wi,mi);
+          const res=getRes(key);
+          if(res.ga===''||res.gb==='')return;
+          const ga=+res.ga,gb=+res.gb;
+          const sA=stats[m.tA],sB=stats[m.tB];
+          if(!sA||!sB)return;
+          sA.gf+=ga;sA.ga+=gb;sA.played++;
+          sB.gf+=gb;sB.ga+=ga;sB.played++;
+          if(ga>gb){sA.pts+=3;sA.w++;sB.l++;}
+          else if(gb>ga){sB.pts+=3;sB.w++;sA.l++;}
+          else{sA.pts+=2;sA.d++;sB.pts+=2;sB.d++;}
+          if(!sA.h2h[m.tB])sA.h2h[m.tB]={gf:0,ga:0};
+          sA.h2h[m.tB].gf+=ga;sA.h2h[m.tB].ga+=gb;
+          if(!sB.h2h[m.tA])sB.h2h[m.tA]={gf:0,ga:0};
+          sB.h2h[m.tA].gf+=gb;sB.h2h[m.tA].ga+=ga;
+        });
       });
-    });
+    };
+    processWaves(rd.wavesH1,1);processWaves(rd.wavesH2,2);
   });
   return Object.values(stats).sort((a,b)=>{
     if(b.pts!==a.pts)return b.pts-a.pts;
@@ -1752,7 +1049,27 @@ function computeStandings(){
   });
 }
 
-function renderMiniStandings(){ const el=document.getElementById('miniStbl');if(el)el.innerHTML=stblHTML(computeStandings()); }
+function stblHTML(arr){
+  if(!arr.length)return'';
+  const med=['🥇','🥈','🥉'];
+  return`<thead><tr>
+    <th class="rank-c">#</th><th style="text-align:left">Équipe</th><th>Club</th>
+    <th>J</th><th class="wc">V</th><th class="dc">N</th><th class="lc">D</th>
+    <th>BP</th><th>BC</th><th>+/-</th><th class="pts-c">Pts</th>
+  </tr></thead><tbody>`+arr.map((s,i)=>{
+    const gd=s.gf-s.ga;
+    return`<tr><td class="rank-c">${med[i]||i+1}</td>
+      <td style="text-align:left;font-weight:600">${s.name}${s.byeTours>0?` <span style="background:#fef6e4;color:#d4890a;border:1px solid #f0d090;border-radius:10px;padding:1px 6px;font-size:10px">🟡×${s.byeTours}</span>`:''}</td>
+      <td style="color:var(--muted);font-size:12px">${s.club||'—'}</td>
+      <td class="played-c">${s.played}</td>
+      <td class="wc">${s.w}</td><td class="dc">${s.d}</td><td class="lc">${s.l}</td>
+      <td>${s.gf}</td><td>${s.ga}</td>
+      <td style="color:${gd>=0?'var(--grn)':'var(--red)'};font-weight:700">${gd>0?'+':''}${gd}</td>
+      <td class="pts-c">${s.pts}</td></tr>`;
+  }).join('')+'</tbody>';
+}
+
+function renderMiniStandings(){const el=document.getElementById('miniStbl');if(el)el.innerHTML=stblHTML(computeStandings());}
 
 // ══════════════════════════════════════════════════════════
 // PAGE 5 — FINAL
@@ -1761,507 +1078,385 @@ function renderFinal(){
   const st=computeStandings();
   const med=[{cls:'pod-1',ico:'🥇'},{cls:'pod-2',ico:'🥈'},{cls:'pod-3',ico:'🥉'}];
   const pod=document.getElementById('podium');
-  if(pod)pod.innerHTML=st.slice(0,3).map((s,i)=>`<div class="pod ${med[i].cls}"><div class="pod-ico">${med[i].ico}</div><div class="pod-nm">${s.name}</div><div class="pod-detail">${s.g==='M'?'♂':s.g==='F'?'♀':'⚧'} &nbsp;·&nbsp; ${'★'.repeat(s.lv)}</div><div class="pod-pts">${s.pts} pts</div><div class="pod-rec">${s.w}V · ${s.d}N · ${s.l}D · ${s.gf}/${s.ga}</div></div>`).join('');
+  if(pod)pod.innerHTML=st.slice(0,3).map((s,i)=>`<div class="pod ${med[i].cls}"><div class="pod-ico">${med[i].ico}</div><div class="pod-nm">${s.name}</div><div class="pod-detail">${s.club||'—'} · ${'★'.repeat(s.lv)}</div><div class="pod-pts">${s.pts} pts</div><div class="pod-rec">${s.w}V · ${s.d}N · ${s.l}D · ${s.gf}/${s.ga}</div></div>`).join('');
   const ft=document.getElementById('finalTbl');if(ft)ft.innerHTML=stblHTML(st);
-  const partnerMap={};
-  ST.schedule.forEach((rd,r)=>rd.waves.forEach((wv,w)=>wv.matches.forEach((m,mi)=>{
-    const res=getRes(r,w,mi);const done=res.ga!==''&&res.gb!=='';
-    [[m.pA1,m.pA2,done&&+res.ga>+res.gb],[m.pB1,m.pB2,done&&+res.gb>+res.ga]].forEach(([p1,p2,win])=>{
-      [p1,p2].forEach(pid=>{const partner=pid===p1?p2:p1;if(!partnerMap[pid])partnerMap[pid]=[];partnerMap[pid].push({partner,win,done});});
-    });
-  })));
-  const rows=ST.players.slice(0,ST.cfg.n).map(p=>{
-    const pts=partnerMap[p.id]||[];
-    return `<div style="display:flex;align-items:center;flex-wrap:wrap;gap:6px;padding:8px 10px;border-bottom:1px solid var(--bdr);font-size:12px"><strong style="min-width:110px">${p.name}</strong>${pts.map(x=>`<span style="padding:2px 8px;border-radius:12px;background:${x.done?(x.win?'var(--grn-bg)':'var(--red-bg)'):'var(--s1)'};color:${x.done?(x.win?'var(--grn)':'var(--red)'):'var(--dim)'};border:1px solid ${x.done?(x.win?'#b8ddc8':'#f0b0a8'):'var(--bdr)'}">${pName(x.partner)}</span>`).join('')}</div>`;
-  }).join('');
-  const pt=document.getElementById('partnerTbl');
-  if(pt)pt.innerHTML=`<div style="font-size:11px;color:var(--muted);padding:8px 10px;border-bottom:1px solid var(--bdr)">🟢 Vert = victoire · 🔴 Rouge = défaite · Gris = non joué</div>${rows}`;
 }
 
 // ══════════════════════════════════════════════════════════
-// TIMER (scorer + admin)
+// TIMER
 // ══════════════════════════════════════════════════════════
 function fmt(s){return String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0');}
-// ══════════════════════════════════════════════════════════
-// 🔊 MOTEUR AUDIO — Web Audio API (desktop + mobile)
-// Pas de fichier externe : tout généré synthétiquement.
-// Sur iOS/Android il faut un geste utilisateur pour débloquer
-// l'AudioContext → on crée le contexte au premier clic sur
-// un bouton du timer, puis on le garde vivant.
-// ══════════════════════════════════════════════════════════
-let _AC = null;          // AudioContext partagé
-let _soundEnabled = true; // l'utilisateur peut couper
+let _AC=null;let _soundEnabled=true;
+function _getAC(){ if(!_AC||_AC.state==='closed'){try{_AC=new(window.AudioContext||window.webkitAudioContext)();}catch(e){_AC=null;}} if(_AC&&_AC.state==='suspended')_AC.resume(); return _AC; }
+function _playTone(freq,dur,type='sine',attack=0.01,vol=0.8,startDelay=0){ const ac=_getAC();if(!ac||!_soundEnabled)return; const t=ac.currentTime+startDelay; const osc=ac.createOscillator(); const gain=ac.createGain(); osc.connect(gain);gain.connect(ac.destination); osc.type=type;osc.frequency.setValueAtTime(freq,t); gain.gain.setValueAtTime(0,t);gain.gain.linearRampToValueAtTime(vol,t+attack);gain.gain.setValueAtTime(vol,t+dur-0.05);gain.gain.linearRampToValueAtTime(0,t+dur); osc.start(t);osc.stop(t+dur); }
+function _playSiren(dur=2.5,vol=0.9){ const ac=_getAC();if(!ac||!_soundEnabled)return; const t=ac.currentTime; for(let i=0;i<3;i++){const osc=ac.createOscillator();const gain=ac.createGain();const dist=ac.createWaveShaper();const curve=new Float32Array(256);for(let j=0;j<256;j++){const x=j*2/255-1;curve[j]=x<0?-Math.pow(-x,.7):Math.pow(x,.7);}dist.curve=curve;osc.connect(dist);dist.connect(gain);gain.connect(ac.destination);osc.type='sawtooth';const cd=dur/3,start=t+i*cd;osc.frequency.setValueAtTime(400,start);osc.frequency.linearRampToValueAtTime(900,start+cd*.6);osc.frequency.linearRampToValueAtTime(600,start+cd);gain.gain.setValueAtTime(0,start);gain.gain.linearRampToValueAtTime(vol,start+0.03);gain.gain.setValueAtTime(vol,start+cd-0.05);gain.gain.linearRampToValueAtTime(0,start+cd);osc.start(start);osc.stop(start+cd+0.01);} }
+function _playWarn30(){ if(!_soundEnabled)return; for(let rep=0;rep<2;rep++){_playTone(880,.12,'sine',.005,.75,rep*.55);_playTone(1100,.15,'sine',.005,.75,rep*.55+.18);} }
+function _playCountdownBeep(isLast){ if(!_soundEnabled)return; if(isLast){_playTone(660,.08,'square',.005,.8);_playTone(880,.10,'square',.005,.8,.12);}else{_playTone(660,.08,'square',.005,.65);} }
+window.toggleSound=function(){ _soundEnabled=!_soundEnabled; const btn=document.getElementById('soundToggle'); if(btn)btn.textContent=_soundEnabled?'🔊':'🔇'; _getAC(); };
+function _unlockAudio(){ _getAC(); const ac=_AC;if(!ac)return; const buf=ac.createBuffer(1,1,22050); const src=ac.createBufferSource(); src.buffer=buf;src.connect(ac.destination);src.start(0); }
+window.toggleLiveOpen=async function(){ if(!isAdmin())return; const newVal=!ST.liveOpen; await saveTournament({liveOpen:newVal}); };
+function updateLiveToggleBtn(){ const btn=document.getElementById('liveToggleBtn');if(!btn)return; if(ST.liveOpen){btn.textContent='🟢 Live ouvert';btn.style.background='linear-gradient(135deg,#0d3320,#1a5c35)';btn.style.borderColor='#2a9d5c';btn.style.color='#5ddc8e';}else{btn.textContent='🔴 Live fermé';btn.style.background='linear-gradient(135deg,#330d0d,#5c1a1a)';btn.style.borderColor='#9d2a2a';btn.style.color='#dc5d5d';} }
+function updateTimerDisplay(){ const el=document.getElementById('tmrDsp');if(!el)return; const s=ST.timerSec; el.textContent=fmt(s); el.className='timer-big '+(s===0?'tc-zero':ST.timerMode==='match'?'tc-match':'tc-trans'); document.getElementById('tmrLbl').textContent=ST.timerMode==='match'?`⏱ TEMPS DE JEU — ${ST.cfg.mt} min`:`⏸ TRANSITION — ${ST.timerMode==='trans'?ST.cfg.tt:ST.cfg.tp} min`; if(ST.timerRun){if(s===0)_playSiren(2.5,.9);else if(s===30)_playWarn30();else if(s>=1&&s<=5)_playCountdownBeep(s===1);} }
+window.startTimer=function(mode){ _unlockAudio(); clearInterval(ST.timerIv);ST.timerMode=mode; const secs=mode==='match'?ST.cfg.mt:mode==='trans'?ST.cfg.tt:ST.cfg.tp; ST.timerSec=secs*60;ST.timerRun=true;updateTimerDisplay(); document.getElementById('tmrP').style.display='';document.getElementById('tmrR').style.display='none'; ST.timerIv=setInterval(()=>{if(ST.timerSec>0){ST.timerSec--;updateTimerDisplay();}else{clearInterval(ST.timerIv);ST.timerRun=false;document.getElementById('tmrP').style.display='none';}},1000); };
+window.pauseTimer=function(){clearInterval(ST.timerIv);ST.timerRun=false;document.getElementById('tmrP').style.display='none';document.getElementById('tmrR').style.display='';};
+window.resumeTimer=function(){ _unlockAudio(); document.getElementById('tmrP').style.display='';document.getElementById('tmrR').style.display='none'; ST.timerRun=true; ST.timerIv=setInterval(()=>{if(ST.timerSec>0){ST.timerSec--;updateTimerDisplay();}else{clearInterval(ST.timerIv);ST.timerRun=false;document.getElementById('tmrP').style.display='none';}},1000); };
 
-function _getAC(){
-  if(!_AC || _AC.state === 'closed'){
-    try { _AC = new (window.AudioContext || window.webkitAudioContext)(); } catch(e){ _AC=null; }
+// ══════════════════════════════════════════════════════════
+// IMPRESSION — FICHES ÉQUIPE + FICHES JOUEUR INDIVIDUELLES
+// Plusieurs fiches sur une feuille A4
+// ══════════════════════════════════════════════════════════
+function _pOpenWindow(name,title,body){
+  const win=window.open('','_'+name,'width=1000,height=750');
+  win.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>${title}</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:'Segoe UI',Arial,sans-serif;font-size:11px;background:#fff;color:#222;margin:8mm 6mm}
+  h1{font-size:16px;font-weight:800;border-bottom:3px solid #1a1410;padding-bottom:6px;margin-bottom:10px}
+  table{width:100%;border-collapse:collapse}
+  th{padding:5px 6px;background:#1a1410;color:#fff;font-size:10px;text-transform:uppercase;letter-spacing:.4px;white-space:nowrap}
+  td{padding:5px 6px;border-bottom:1px solid #e8e0d5;vertical-align:middle}
+  tr:nth-child(even)td{background:#fafaf8}
+  .win{color:#1e8c45;font-weight:700}.lose{color:#c0281a;font-weight:700}.draw{color:#d4890a;font-weight:700}
+  /* ── FICHES ÉQUIPE ── */
+  .sheet-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:8mm;margin-bottom:8mm}
+  .team-sheet{border:2px solid #1a1410;border-radius:6px;overflow:hidden;break-inside:avoid}
+  .team-sheet-hdr{background:#1a1410;color:#fff;padding:8px 10px;display:flex;align-items:center;gap:8px}
+  .team-sheet-hdr .t-ico{font-size:22px}
+  .team-sheet-hdr .t-name{font-size:14px;font-weight:800;letter-spacing:.3px}
+  .team-sheet-hdr .t-sub{font-size:10px;color:rgba(255,255,255,.55);margin-top:1px}
+  .team-sheet-body{padding:6px 8px}
+  .match-row{display:grid;grid-template-columns:28px 1fr 24px 18px 24px;align-items:center;gap:4px;padding:4px 0;border-bottom:1px solid #ede8e0;font-size:10.5px}
+  .match-row:last-child{border:none}
+  .match-row .court{font-weight:700;color:#888;font-size:9px}
+  .match-row .opp{font-weight:600;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .match-row .score{font-weight:900;font-size:13px;text-align:center}
+  .match-row .res{font-size:9px;font-weight:700;text-align:center}
+  .match-row .vs{color:#aaa;font-size:9px;text-align:center}
+  .tour-label{font-size:9px;font-weight:700;color:#7a6a50;text-transform:uppercase;letter-spacing:.5px;background:#f5f0e8;padding:3px 8px;border-bottom:1px solid #e0d8cc;display:flex;align-items:center;justify-content:space-between}
+  .sub-row{display:flex;align-items:center;gap:4px;padding:5px 8px;background:#fffbe8;color:#b87c00;font-weight:700;font-size:10px}
+  /* ── FICHES JOUEUR INDIVIDUEL ── */
+  .player-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:8mm}
+  .player-sheet{border:2px solid #1a3060;border-radius:6px;overflow:hidden;break-inside:avoid}
+  .player-sheet-hdr{background:linear-gradient(135deg,#1a2e50,#0d1c35);color:#fff;padding:8px 10px}
+  .player-sheet-hdr .p-name{font-size:14px;font-weight:800}
+  .player-sheet-hdr .p-sub{font-size:10px;color:rgba(255,255,255,.5);margin-top:2px}
+  .player-match{display:grid;grid-template-columns:22px 1fr 50px 50px;gap:4px;align-items:center;padding:4px 8px;border-bottom:1px solid #e8e0d5;font-size:10px}
+  .player-match.sub-row-p{background:#fffbe8}
+  .player-match .t-num{font-weight:700;color:#555;font-size:9px}
+  .player-match .partner{color:#1a6aaa;font-weight:600}
+  .player-match .vs-p{color:#aaa;font-size:9px}
+  .player-match .opp-p{color:#555}
+  .player-match .result{text-align:right;font-weight:700;font-size:11px}
+  /* ── Classement ── */
+  .rank-section{margin-top:10mm;break-before:page}
+  .rank-hdr{background:#1a1410;color:#fff;padding:7px 10px;font-size:13px;font-weight:700}
+  .medal{font-size:15px}
+  .pts{font-size:14px;font-weight:900;color:#1e8c45}
+  /* ── Print ── */
+  @page{size:A4 portrait;margin:0}
+  @media print{
+    body{margin:6mm}
+    .no-print{display:none !important}
+    .sheet-grid,.player-grid{break-inside:avoid}
+    .team-sheet,.player-sheet{break-inside:avoid}
+    /* 2 fiches par page A4 */
+    .team-sheet,.player-sheet{page-break-inside:avoid}
   }
-  if(_AC && _AC.state === 'suspended') _AC.resume();
-  return _AC;
+</style></head><body>${body}
+<div class="no-print" style="margin-top:16px;display:flex;gap:8px">
+  <button onclick="window.print()" style="padding:8px 22px;background:#1a1410;color:#fff;border:none;border-radius:6px;font-size:13px;cursor:pointer">🖨 Imprimer</button>
+  <button onclick="window.close()" style="padding:8px 22px;background:#eee;color:#333;border:none;border-radius:6px;font-size:13px;cursor:pointer">Fermer</button>
+</div></body></html>`);
+  win.document.close();
+  setTimeout(()=>win.print(),500);
 }
 
-// ─── Utilitaire : jouer une note synthétique ─────────────
-// freq   : fréquence Hz
-// dur    : durée totale en secondes
-// type   : 'sine'|'square'|'sawtooth'
-// attack : ramp montée (s)
-// vol    : volume 0-1
-function _playTone(freq, dur, type='sine', attack=0.01, vol=0.8, startDelay=0){
-  const ac = _getAC(); if(!ac || !_soundEnabled) return;
-  const t = ac.currentTime + startDelay;
-  const osc = ac.createOscillator();
-  const gain = ac.createGain();
-  osc.connect(gain); gain.connect(ac.destination);
-  osc.type = type;
-  osc.frequency.setValueAtTime(freq, t);
-  gain.gain.setValueAtTime(0, t);
-  gain.gain.linearRampToValueAtTime(vol, t + attack);
-  gain.gain.setValueAtTime(vol, t + dur - 0.05);
-  gain.gain.linearRampToValueAtTime(0, t + dur);
-  osc.start(t); osc.stop(t + dur);
-}
-
-// ─── Sirène finale (sweep fréquence montant-descendant) ──
-function _playSiren(durationSec = 2.5, vol = 0.9){
-  const ac = _getAC(); if(!ac || !_soundEnabled) return;
-  const t = ac.currentTime;
-  // 3 cycles de montée-descente
-  for(let i=0;i<3;i++){
-    const osc = ac.createOscillator();
-    const gain = ac.createGain();
-    const dist = ac.createWaveShaper();
-    // Saturation légère pour plus de présence
-    const curve = new Float32Array(256);
-    for(let j=0;j<256;j++){ const x=j*2/255-1; curve[j]=x<0?-Math.pow(-x,.7):Math.pow(x,.7); }
-    dist.curve = curve;
-    osc.connect(dist); dist.connect(gain); gain.connect(ac.destination);
-    osc.type = 'sawtooth';
-    const cycDur = durationSec / 3;
-    const start = t + i * cycDur;
-    osc.frequency.setValueAtTime(400, start);
-    osc.frequency.linearRampToValueAtTime(900, start + cycDur * 0.6);
-    osc.frequency.linearRampToValueAtTime(600, start + cycDur);
-    gain.gain.setValueAtTime(0, start);
-    gain.gain.linearRampToValueAtTime(vol, start + 0.03);
-    gain.gain.setValueAtTime(vol, start + cycDur - 0.05);
-    gain.gain.linearRampToValueAtTime(0, start + cycDur);
-    osc.start(start); osc.stop(start + cycDur + 0.01);
-  }
-}
-
-// ─── Signal « 30 secondes restantes » ────────────────────
-// Double bip montant, répété 2 fois, ton jaune/alerte
-function _playWarn30(){
-  if(!_soundEnabled) return;
-  // 2 × double bip espacés de 0.6s
-  for(let rep=0;rep<2;rep++){
-    _playTone(880, 0.12, 'sine', 0.005, 0.75, rep*0.55);
-    _playTone(1100, 0.15, 'sine', 0.005, 0.75, rep*0.55 + 0.18);
-  }
-}
-
-// ─── Bip des 5 dernières secondes (un bip par seconde) ───
-// Bip court grave + aigu pour rythmer le compte à rebours
-function _playCountdownBeep(isLast){
-  if(!_soundEnabled) return;
-  if(isLast){
-    // Dernière seconde → double bip spécial avant sirène
-    _playTone(660, 0.08, 'square', 0.005, 0.8);
-    _playTone(880, 0.10, 'square', 0.005, 0.8, 0.12);
-  } else {
-    _playTone(660, 0.08, 'square', 0.005, 0.65);
-  }
-}
-
-// ─── Bouton mute intégré ─────────────────────────────────
-window.toggleSound = function(){
-  _soundEnabled = !_soundEnabled;
-  const btn = document.getElementById('soundToggle');
-  if(btn) btn.textContent = _soundEnabled ? '🔊' : '🔇';
-  // Débloquer l'AudioContext si pas encore fait
-  _getAC();
-};
-
-// Débloquer l'AudioContext au premier geste (iOS exige un tap)
-function _unlockAudio(){
-  _getAC();
-  // Jouer un silence pour "chauffer" le contexte sur iOS
-  const ac = _AC; if(!ac) return;
-  const buf = ac.createBuffer(1,1,22050);
-  const src = ac.createBufferSource();
-  src.buffer = buf; src.connect(ac.destination);
-  src.start(0);
-}
-
-// ══════════════════════════════════════════════════════════
-// LIVE OPEN / FERMÉ — contrôle admin
-// ══════════════════════════════════════════════════════════
-// Ouvre le règlement depuis l'overlay "live fermé" sans entrer dans la page live
-window.openReglement = function(){
-  CURRENT_USER = null;
-  USER_ROLE    = 'spectator';
-  document.getElementById('loginScreen').style.display='none';
-  document.getElementById('appScreen').style.display='block';
-  applyRoleUI();
-  // Afficher directement la page règlement sans goTo(4)
-  document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
-  const pageR = document.getElementById('pageR');
-  if(pageR){ pageR.classList.add('active'); ST.rulesOpen=true; }
-  else { toggleRules(); } // fallback
-  const ruleBtn = document.getElementById('ruleBtn');
-  if(ruleBtn) ruleBtn.textContent='× Fermer';
-  window.scrollTo(0,0);
-};
-
-window.toggleLiveOpen = async function(){
-  if(!isAdmin()){ alert('Admin uniquement.'); return; }
-  const newVal = !ST.liveOpen;
-  await saveTournament({ liveOpen: newVal });
-  // ST.liveOpen et bouton mis à jour via le subscribe
-};
-
-function updateLiveToggleBtn(){
-  const btn = document.getElementById('liveToggleBtn');
-  if(!btn) return;
-  if(ST.liveOpen){
-    btn.textContent = '🟢 Live ouvert';
-    btn.style.background = 'linear-gradient(135deg,#0d3320,#1a5c35)';
-    btn.style.borderColor = '#2a9d5c';
-    btn.style.color = '#5ddc8e';
-  } else {
-    btn.textContent = '🔴 Live fermé';
-    btn.style.background = 'linear-gradient(135deg,#330d0d,#5c1a1a)';
-    btn.style.borderColor = '#9d2a2a';
-    btn.style.color = '#dc5d5d';
-  }
-}
-
-function updateTimerDisplay(){
-  const el=document.getElementById('tmrDsp');if(!el)return;
-  const s=ST.timerSec;
-  el.textContent=fmt(s);
-  el.className='timer-big '+(s===0?'tc-zero':ST.timerMode==='match'?'tc-match':'tc-trans');
-  document.getElementById('tmrLbl').textContent=ST.timerMode==='match'?`⏱ TEMPS DE JEU — ${ST.cfg.mt} min`:`⏸ TRANSITION — ${ST.timerMode==='trans'?ST.cfg.tt:ST.cfg.tp} min`;
-  // ── Signaux sonores ──────────────────────────────────────
-  if(ST.timerRun){
-    if(s===0){
-      // Fin du temps : sirène
-      _playSiren(2.5, 0.9);
-    } else if(s===30){
-      // 30 secondes restantes : alerte
-      _playWarn30();
-    } else if(s>=1 && s<=5){
-      // Compte à rebours final
-      _playCountdownBeep(s===1);
-    }
-  }
-}
-window.startTimer = function(mode){
-  _unlockAudio();
-  clearInterval(ST.timerIv);ST.timerMode=mode;
-  const secs=mode==='match'?ST.cfg.mt:mode==='trans'?ST.cfg.tt:ST.cfg.tp;
-  ST.timerSec=secs*60;ST.timerRun=true;updateTimerDisplay();
-  document.getElementById('tmrP').style.display='';document.getElementById('tmrR').style.display='none';
-  ST.timerIv=setInterval(()=>{if(ST.timerSec>0){ST.timerSec--;updateTimerDisplay();}else{clearInterval(ST.timerIv);ST.timerRun=false;document.getElementById('tmrP').style.display='none';}},1000);
-};
-window.pauseTimer = function(){clearInterval(ST.timerIv);ST.timerRun=false;document.getElementById('tmrP').style.display='none';document.getElementById('tmrR').style.display='';};
-window.resumeTimer = function(){
-  _unlockAudio();
-  document.getElementById('tmrP').style.display='';document.getElementById('tmrR').style.display='none';
-  ST.timerRun=true;
-  ST.timerIv=setInterval(()=>{if(ST.timerSec>0){ST.timerSec--;updateTimerDisplay();}else{clearInterval(ST.timerIv);ST.timerRun=false;document.getElementById('tmrP').style.display='none';}},1000);
-};
-
-// ══════════════════════════════════════════════════════════
-// IMPRESSION (identique v5)
-// ══════════════════════════════════════════════════════════
-function _pSubBadge(s){return s.byeTours>0?' <span style="background:#fef6e4;color:#d4890a;border:1px solid #f0d090;border-radius:10px;padding:1px 6px;font-size:10px">&#x1F7E1;x'+s.byeTours+'</span>':'';}
-function _pRankRows(arr,pad){var med=['&#x1F947;','&#x1F948;','&#x1F949;'];var p=pad||'5px 6px';return arr.map(function(s,i){var gd=s.gf-s.ga;var gdCol=gd>=0?'#1e8c45':'#c0281a';var rkCol=i<3?'#1e8c45':'#888';return '<tr style="border-bottom:1px solid #eee"><td style="padding:'+p+';text-align:center;font-weight:700;color:'+rkCol+'">'+(med[i]||i+1)+'</td><td style="padding:'+p+';font-weight:600">'+s.name+_pSubBadge(s)+'</td><td style="padding:'+p+';text-align:center;color:#888">'+s.played+'</td><td style="padding:'+p+';text-align:center;color:#1e8c45;font-weight:700">'+s.w+'</td><td style="padding:'+p+';text-align:center;color:#d4890a">'+s.d+'</td><td style="padding:'+p+';text-align:center;color:#c0281a">'+s.l+'</td><td style="padding:'+p+';text-align:center">'+s.gf+'</td><td style="padding:'+p+';text-align:center">'+s.ga+'</td><td style="padding:'+p+';text-align:center;color:'+gdCol+'">'+(gd>0?'+':'')+gd+'</td><td style="padding:'+p+';text-align:center;font-weight:900;font-size:14px;color:#1e8c45">'+s.pts+'</td></tr>';}).join('');}
-function _pRankTable(arr,pad){return '<table><thead><tr><th>#</th><th style="text-align:left">Joueur</th><th>J</th><th style="color:#5ad080">V</th><th style="color:#ffd080">N</th><th style="color:#ff8070">D</th><th>BP</th><th>BC</th><th>+/-</th><th style="color:#5ad080">Pts</th></tr></thead><tbody>'+_pRankRows(arr,pad)+'</tbody></table>';}
-function _pMatchRow(m,mi,ri,wi,showScore){var row='<div style="display:flex;align-items:center;gap:8px;padding:5px 8px;background:#fff;border:1px solid #ddd;border-radius:4px;margin-bottom:3px;font-family:sans-serif;font-size:12px">';row+='<span style="font-weight:700;color:#888;min-width:26px">T'+(mi+1)+'</span>';row+='<span style="font-weight:700;flex:1">'+pName(m.pA1)+'</span>';if(showScore){var res=getRes(ri,wi,mi);var done=res.ga!==''&&res.gb!=='';var cA=done?(res.ga>res.gb?'#1e8c45':'#c0281a'):'#999';var cB=done?(res.gb>res.ga?'#1e8c45':'#c0281a'):'#999';row+='<span style="font-size:17px;font-weight:900;color:'+cA+';min-width:26px;text-align:center">'+(done?res.ga:'__')+'</span><span style="color:#888;font-weight:700">&#8211;</span><span style="font-size:17px;font-weight:900;color:'+cB+';min-width:26px;text-align:center">'+(done?res.gb:'__')+'</span>';}else{row+='<span style="color:#aaa;font-weight:700;padding:0 6px">VS</span>';}row+='<span style="font-weight:700;flex:1;text-align:right">'+pName(m.pB1)+'</span></div>';return row;}
-function _pWaveBlock(wv,wi,nWaves,ri,showScore){var h='';if(nWaves>1)h='<div style="font-size:11px;font-weight:700;color:#555;margin:7px 0 3px">Vague '+(wi+1)+' &middot; '+wv.waveTime+'</div>';else h='<div style="font-size:11px;color:#888;margin-bottom:4px">'+wv.waveTime+'</div>';wv.matches.forEach(function(m,mi){h+=_pMatchRow(m,mi,ri,wi,showScore);});return h;}
-function _pRoundBlock(rd,ri,showScore){var subTxt=rd.subs.length?(' &middot; Remplacant'+(rd.subs.length>1?'s':'')+': '+rd.subs.map(function(id){return pName(id);}).join(', ')):'  &middot; Tous jouent';var h='<div style="margin-bottom:14px;page-break-inside:avoid"><div style="background:#1a1410;color:#fff;padding:7px 12px;font-size:13px;font-weight:700">Tour '+(ri+1)+' &middot; '+rd.roundTime+subTxt+'</div><div style="padding:8px;background:#f7f3ee;border:1px solid #ccc;border-top:none">';rd.waves.forEach(function(wv,wi){h+=_pWaveBlock(wv,wi,rd.waves.length,ri,showScore);});h+='</div></div>';return h;}
-function _pOpenWindow(name,title,body){var win=window.open('','_'+name,'width=900,height=700');win.document.write('<!DOCTYPE html><html><head><meta charset="UTF-8"><title>'+title+'</title><style>body{margin:16px;font-family:sans-serif;font-size:12px}table{width:100%;border-collapse:collapse}th{padding:6px;background:#1a1410;color:#fff;font-size:11px;text-transform:uppercase;letter-spacing:.4px}@page{size:auto;margin:0mm}@media print{.no-print{display:none !important}.print-title{display:none !important}body{margin:6mm 8mm}}</style></head><body>'+body+'<div class="no-print" style="margin-top:20px"><button onclick="window.print()">Imprimer</button> <button onclick="window.close()">Fermer</button></div></body></html>');win.document.close();setTimeout(function(){win.print();},400);}
-window.reloadApp = function(){
-  if(!confirm('Recharger la dernière version de l\'application ?\n\nLes données du tournoi en cours seront conservées dans le navigateur.')){return;}
-  var url = location.href.split('?')[0];
-  location.replace(url + '?v=' + Date.now());
-};
-window.printPlanning = function(){var body='<div class="print-title" style="font-size:18px;font-weight:700;margin-bottom:14px;border-bottom:2px solid #333;padding-bottom:8px">Planning &mdash; Pickleball Americano &middot; '+ST.cfg.n+' joueurs &middot; '+ST.cfg.t+' terrains &middot; '+ST.cfg.r+' tours</div>';ST.schedule.forEach(function(rd,ri){body+=_pRoundBlock(rd,ri,false);});_pOpenWindow('planning','Planning - Pickleball Americano',body);};
-window.printCurrentRound = function(){var ri=ST.activeRound;var rd=ST.schedule[ri];if(!rd)return;var st=computeStandings();var subTxt=rd.subs.length?' &middot; Remplacant'+(rd.subs.length>1?'s':'')+': '+rd.subs.map(function(id){return pName(id);}).join(', '):'';var body='<div class="print-title" style="font-size:17px;font-weight:700;margin-bottom:12px;border-bottom:2px solid #333;padding-bottom:8px">Tour '+(ri+1)+' &mdash; Pickleball Americano &middot; '+rd.roundTime+subTxt+'</div>';body+='<div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;color:#555">Matchs du tour</div>';rd.waves.forEach(function(wv,wi){body+=_pWaveBlock(wv,wi,rd.waves.length,ri,true);});body+='<div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:1px;margin:18px 0 8px;color:#555">Classement apres '+(ri+1)+' tour'+(ri>0?'s':'')+'</div>';body+=_pRankTable(st);_pOpenWindow('round','Tour '+(ri+1)+' - Pickleball Americano',body);};
-// ══════════════════════════════════════════════════════════
-// PROGRAMME INDIVIDUEL — impression + vue spectateur
-// ══════════════════════════════════════════════════════════
-
-// Retourne les infos de programme d'un joueur sur tout le tournoi
-function getPlayerSchedule(pid){
-  var rows = [];
-  ST.schedule.forEach(function(rd, ri){
-    var isSub = rd.subs.indexOf(pid) !== -1;
-    if(isSub){
-      rows.push({ ri:ri, roundTime:rd.roundTime, type:'sub',
-        waveTime:rd.roundTime, court:'-', partner:null,
-        oppA:null, oppB:null, waveLabel:'-' });
+// Génère le HTML d'une fiche équipe (pour impression dense)
+function _teamSheetHTML(team){
+  const rows=[];
+  ST.schedule.forEach((rd,ri)=>{
+    const tid=team.id;
+    const isSubH1=(rd.subsH1||[]).includes(tid);
+    const isSubH2=(rd.subsH2||[]).includes(tid);
+    if(isSubH1||isSubH2){
+      rows.push({ri,type:'sub',roundTime:rd.roundTime});
       return;
     }
-    // Calculer le numéro de vague réel (vagues normales seulement, sans les early)
-    var normalWaves = rd.waves.filter(function(wv){ return !wv._isEarlyWave; });
-    rd.waves.forEach(function(wv, wi){
-      wv.matches.forEach(function(m, mi){
-        var inMatch = [m.pA1,m.pA2,m.pB1,m.pB2].indexOf(pid) !== -1;
-        if(!inMatch) return;
-        var isA = (m.pA1===pid||m.pA2===pid);
-        var partner = isA ? (m.pA1===pid?m.pA2:m.pA1) : (m.pB1===pid?m.pB2:m.pB1);
-        var opp1   = isA ? m.pB1 : m.pA1;
-        var opp2   = isA ? m.pB2 : m.pA2;
-        var res    = getRes(ri, wi, mi);
-        var myScore  = isA ? res.ga : res.gb;
-        var oppScore = isA ? res.gb : res.ga;
-        // Numéro de vague affiché
-        var waveLabel;
-        if(wv._isEarlyWave){
-          waveLabel = 'Anticipé';
-        } else if(normalWaves.length <= 1){
-          waveLabel = '-'; // une seule vague → pas de numéro utile
-        } else {
-          waveLabel = 'V'+(normalWaves.indexOf(wv)+1);
-        }
-        rows.push({ ri:ri, roundTime:rd.roundTime, type:'match',
-          wi:wi, mi:mi, waveTime:wv.waveTime,
-          court:'T'+(mi+1), partner:partner,
-          opp1:opp1, opp2:opp2,
-          myScore:myScore, oppScore:oppScore,
-          early:!!m._early, waveLabel:waveLabel });
+    const processWaves=(waves,hall)=>{
+      (waves||[]).forEach((wv,wi)=>{
+        wv.matches.forEach((m,mi)=>{
+          if(m.tA!==tid&&m.tB!==tid)return;
+          const key=matchKey(ri,hall,wi,mi);
+          const res=getRes(key);
+          const isA=m.tA===tid;
+          const opp=isA?m.tB:m.tA;
+          const myScore=isA?res.ga:res.gb;
+          const oppScore=isA?res.gb:res.ga;
+          const done=myScore!==''&&oppScore!=='';
+          const win=done&&+myScore>+oppScore,lose=done&&+myScore<+oppScore;
+          rows.push({ri,type:'match',waveTime:wv.waveTime,court:mi+1,hall,opp,myScore,oppScore,done,win,lose,draw:done&&!win&&!lose});
+        });
       });
-    });
+    };
+    processWaves(rd.wavesH1,1);processWaves(rd.wavesH2,2);
   });
-  return rows;
+
+  const pts=rows.filter(r=>r.type==='match').reduce((s,r)=>s+(r.win?3:r.draw?2:0),0);
+  const wins=rows.filter(r=>r.win).length,draws=rows.filter(r=>r.draw).length,losses=rows.filter(r=>r.lose).length;
+
+  let html=`<div class="team-sheet">
+    <div class="team-sheet-hdr">
+      <span class="t-ico">🏓</span>
+      <div>
+        <div class="t-name">${team.name}</div>
+        <div class="t-sub">${team.club||'—'} · ${team.p1} &amp; ${team.p2} · Niv.${'★'.repeat(team.lv)}</div>
+      </div>
+      <div style="margin-left:auto;text-align:right">
+        <div style="font-size:18px;font-weight:900;color:#5ddc8e">${pts}</div>
+        <div style="font-size:9px;color:rgba(255,255,255,.5)">pts</div>
+      </div>
+    </div>
+    <div class="team-sheet-body">`;
+
+  let lastRound=-1;
+  rows.forEach(row=>{
+    if(row.ri!==lastRound){
+      lastRound=row.ri;
+      html+=`<div class="tour-label"><span>Tour ${row.ri+1}</span><span>${row.roundTime}</span></div>`;
+    }
+    if(row.type==='sub'){
+      html+=`<div class="sub-row">🟡 Exempte ce tour</div>`;
+    } else {
+      const sc=row.done?`<span class="score ${row.win?'win':row.lose?'lose':'draw'}">${row.myScore}</span><span class="vs">–</span><span class="score ${!row.win&&!row.lose&&row.done?'draw':row.lose?'win':'lose'}">${row.oppScore}</span>`:`<span style="color:#aaa">_ – _</span>`;
+      const resLabel=row.done?(row.win?'<span class="win">✓V</span>':row.lose?'<span class="lose">✗D</span>':'<span class="draw">~N</span>'):'';
+      const hallLabel=ST.cfg.halls===2?` S${row.hall}`:'';
+      html+=`<div class="match-row">
+        <span class="court">T${row.court}${hallLabel}</span>
+        <span class="opp">${pName(row.opp)}</span>
+        ${sc}
+        <span class="res">${resLabel}</span>
+      </div>`;
+    }
+  });
+
+  html+=`<div style="background:#f7f3ee;padding:5px 8px;display:flex;gap:12px;justify-content:center;font-size:10px;color:#7a6a50;border-top:1px solid #e0d8cc">
+    <span class="win">${wins}V</span><span class="draw">${draws}N</span><span class="lose">${losses}D</span>
+    <span>·</span><span style="font-weight:800;color:#1e8c45">${pts} pts</span>
+  </div></div></div>`;
+  return html;
 }
 
-// Impression fiche individuelle
-window.printPlayerSchedule = function(pid){
-  if(!ST.schedule.length){ alert('Aucun programme généré.'); return; }
-  var p   = ST.players.find(function(x){return x.id===pid;});
-  if(!p) return;
-  var rows = getPlayerSchedule(pid);
-  var pts=0, wins=0, draws=0, losses=0;
+// Génère le HTML d'une fiche joueur individuel
+function _playerSheetHTML(team,playerIdx){
+  const p=playerIdx===0?team.p1:team.p2;
+  const rows=[];
+  ST.schedule.forEach((rd,ri)=>{
+    const isSubH1=(rd.subsH1||[]).includes(team.id);
+    const isSubH2=(rd.subsH2||[]).includes(team.id);
+    if(isSubH1||isSubH2){rows.push({ri,type:'sub',roundTime:rd.roundTime});return;}
+    const processWaves=(waves,hall)=>{
+      (waves||[]).forEach((wv,wi)=>{
+        wv.matches.forEach((m,mi)=>{
+          if(m.tA!==team.id&&m.tB!==team.id)return;
+          const key=matchKey(ri,hall,wi,mi);
+          const res=getRes(key);
+          const isA=m.tA===team.id;
+          const opp=isA?m.tB:m.tA;
+          const myScore=isA?res.ga:res.gb;
+          const oppScore=isA?res.gb:res.ga;
+          const done=myScore!==''&&oppScore!=='';
+          const win=done&&+myScore>+oppScore;
+          rows.push({ri,type:'match',waveTime:wv.waveTime,court:mi+1,hall,opp,myScore,oppScore,done,win,lose:done&&!win&&+myScore<+oppScore,draw:done&&myScore===oppScore});
+        });
+      });
+    };
+    processWaves(rd.wavesH1,1);processWaves(rd.wavesH2,2);
+  });
 
-  var tableRows = rows.map(function(row){
+  let html=`<div class="player-sheet">
+    <div class="player-sheet-hdr">
+      <div class="p-name">👤 ${p}</div>
+      <div class="p-sub">Équipe : ${team.name} · ${team.club||'—'}</div>
+    </div>`;
+
+  let lastRound=-1;
+  rows.forEach(row=>{
+    if(row.ri!==lastRound){
+      lastRound=row.ri;
+      html+=`<div class="tour-label"><span>Tour ${row.ri+1}</span><span>${row.roundTime||''}</span></div>`;
+    }
     if(row.type==='sub'){
-      return '<tr style="background:#fffbe8">'
-        +'<td style="padding:6px 8px;font-weight:700;color:#333">Tour '+(row.ri+1)+'</td>'
-        +'<td style="padding:6px 8px;color:#888">'+row.roundTime+'</td>'
-        +'<td style="padding:6px 8px;color:#b87c00;font-weight:700">—</td>'
-        +'<td colspan="3" style="padding:6px 8px;font-weight:700;color:#b87c00;text-align:center">🟡 Remplaçant — au repos ce tour</td>'
-        +'</tr>';
+      html+=`<div class="player-match sub-row-p"><span>—</span><span colspan="3" style="color:#b87c00;font-weight:700">🟡 Exempte</span></div>`;
+    } else {
+      const sc=row.done?`${row.myScore} – ${row.oppScore}`:'_ – _';
+      const res=row.done?(row.win?'✅V':row.lose?'❌D':'🟡N'):'';
+      const hallLabel=ST.cfg.halls===2?` S${row.hall}`:'';
+      html+=`<div class="player-match">
+        <span class="t-num">T${row.court}${hallLabel}</span>
+        <span class="opp-p">vs ${pName(row.opp)}</span>
+        <span style="text-align:center;font-weight:700;font-size:11px">${sc}</span>
+        <span class="result">${res}</span>
+      </div>`;
     }
-    var done = row.myScore!==''&&row.oppScore!=='';
-    var result='', bg='#fff', rc='#999';
-    if(done){
-      var ms=+row.myScore, os=+row.oppScore;
-      if(ms>os){result='✅ Victoire';bg='#f0fff5';rc='#1e8c45';wins++;pts+=3;}
-      else if(ms<os){result='❌ Défaite';bg='#fff5f5';rc='#c0281a';losses++;pts+=0;}
-      else{result='🟡 Nul';bg='#fffbe8';rc='#b87c00';draws++;pts+=1;}
-    }
-    var scoreStr = done ? '<strong style="font-size:15px">'+row.myScore+'</strong> – <strong style="font-size:15px">'+row.oppScore+'</strong>' : '_ – _';
-    var waveTd = (row.waveLabel&&row.waveLabel!=='-') ? row.waveLabel : (row.early?'⚡Ant.':'-');
-    return '<tr style="background:'+bg+'">'
-      +'<td style="padding:6px 8px;font-weight:700;color:#333">Tour '+(row.ri+1)+(row.early?' <span style=\"font-size:9px;background:#e0e8ff;color:#3060c0;border-radius:3px;padding:1px 4px\">anticipé</span>':'')+'</td>'
-      +'<td style="padding:6px 8px;color:#555">'+row.waveTime+'</td>'
-      +'<td style="padding:6px 8px;font-weight:700;color:#7040b0">'+waveTd+'</td>'
-      +'<td style="padding:6px 8px;font-weight:700;color:#3060c0">'+row.court+'</td>'
-      +'<td style="padding:6px 8px">'+pName(row.partner)+'</td>'
-      +'<td style="padding:6px 8px;color:#555">'+pName(row.opp1)+' + '+pName(row.opp2)+'</td>'
-      +'<td style="padding:6px 8px;text-align:center">'+scoreStr+'<br><span style="font-size:10px;color:'+rc+'">'+result+'</span></td>'
-      +'</tr>';
-  }).join('');
+  });
+  html+=`</div>`;
+  return html;
+}
 
-  var body = '<div class="print-title" style="display:flex;align-items:center;gap:16px;margin-bottom:18px;border-bottom:2px solid #1a1410;padding-bottom:12px">'
-    +'<div style="font-size:40px">'+(p.g==='F'?'👩':'👨')+'</div>'
-    +'<div><div style="font-size:20px;font-weight:900;color:#1a1410">'+p.name+'</div>'
-    +'<div style="font-size:12px;color:#666;margin-top:2px">'
-    +'Niveau '+p.lv+' · Tournoi Pickleball Americano · '+ST.cfg.n+' joueurs · '+ST.cfg.t+' terrains · '+ST.cfg.r+' tours'
-    +'</div></div></div>'
-    +'<table style="width:100%;border-collapse:collapse;margin-bottom:18px">'
-    +'<thead><tr style="background:#1a1410;color:#fff">'
-    +'<th style="padding:7px 8px;text-align:left;font-size:11px">TOUR</th>'
-    +'<th style="padding:7px 8px;text-align:left;font-size:11px">HORAIRE</th>'
-    +'<th style="padding:7px 8px;text-align:left;font-size:11px">VAGUE</th>'
-    +'<th style="padding:7px 8px;text-align:left;font-size:11px">TERRAIN</th>'
-    +'<th style="padding:7px 8px;text-align:left;font-size:11px">PARTENAIRE</th>'
-    +'<th style="padding:7px 8px;text-align:left;font-size:11px">ADVERSAIRES</th>'
-    +'<th style="padding:7px 8px;text-align:center;font-size:11px">SCORE / RÉSULTAT</th>'
-    +'</tr></thead><tbody>'+tableRows+'</tbody></table>'
-    +'<div style="display:flex;gap:12px;flex-wrap:wrap">'
-    +'<div style="background:#f7f7f7;border:1px solid #ddd;border-radius:8px;padding:10px 18px;text-align:center">'
-    +'<div style="font-size:22px;font-weight:900;color:#1a8c45">'+pts+'</div><div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.5px">Points</div></div>'
-    +'<div style="background:#f0fff5;border:1px solid #b8e8c8;border-radius:8px;padding:10px 18px;text-align:center">'
-    +'<div style="font-size:22px;font-weight:900;color:#1e8c45">'+wins+'</div><div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.5px">Victoires</div></div>'
-    +'<div style="background:#fffbe8;border:1px solid #e8dca0;border-radius:8px;padding:10px 18px;text-align:center">'
-    +'<div style="font-size:22px;font-weight:900;color:#b87c00">'+draws+'</div><div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.5px">Nuls</div></div>'
-    +'<div style="background:#fff5f5;border:1px solid #e8b8b8;border-radius:8px;padding:10px 18px;text-align:center">'
-    +'<div style="font-size:22px;font-weight:900;color:#c0281a">'+losses+'</div><div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.5px">Défaites</div></div>'
-    +'</div>';
-
-  _pOpenWindow('player_'+pid, 'Programme — '+p.name+' — Pickleball Americano', body);
+// Impression fiches équipes (2 par ligne A4)
+window.printTeamSheets = function(filterIds){
+  if(!ST.schedule.length){alert('Aucun programme généré.');return;}
+  const teams=filterIds?ST.teams.filter(t=>filterIds.includes(t.id)):ST.teams.slice(0,ST.cfg.n);
+  const sorted=[...teams].sort((a,b)=>a.name.localeCompare(b.name,'fr'));
+  let body=`<h1>📋 Fiches équipes — ${ST.cfg.n} équipes · ${ST.cfg.r} tours</h1>
+<div class="sheet-grid">`;
+  sorted.forEach(t=>{ body+=_teamSheetHTML(t); });
+  body+=`</div>`;
+  _pOpenWindow('team_sheets','Fiches Équipes — Interclub',body);
 };
 
-// ── Vue spectateur : modal programme joueur ────────────────
-window.showPlayerList = function(){
-  if(isLiveBlocked()){
-    document.getElementById('liveClosedOverlay').style.display='flex';
-    return;
-  }
-  var el = document.getElementById('playerListModal');
-  if(el){ el.style.display='flex'; return; }
-  // Créer la modal dynamiquement
-  var modal = document.createElement('div');
-  modal.id = 'playerListModal';
-  modal.style.cssText='position:fixed;inset:0;z-index:8000;background:rgba(0,0,0,.78);backdrop-filter:blur(5px);display:flex;align-items:flex-start;justify-content:center;padding:20px 12px;overflow-y:auto';
-  modal.innerHTML = '<div style="max-width:440px;width:100%;background:#16202e;border:1.5px solid rgba(122,220,255,.25);border-radius:16px;padding:0 0 20px;overflow:hidden">'
-    +'<div style="background:linear-gradient(135deg,#0d1c30,#1a2e48);padding:18px 20px;display:flex;align-items:center;justify-content:space-between">'
-    +'<div><div style="font-family:\'Oswald\',sans-serif;font-size:18px;font-weight:700;color:#7adcff;letter-spacing:1px;text-transform:uppercase">👤 Joueurs inscrits</div>'
-    +'<div style="font-size:11px;color:rgba(255,255,255,.4);margin-top:3px">Sélectionnez un joueur pour voir son programme</div></div>'
-    +'<button onclick="document.getElementById(\'playerListModal\').style.display=\'none\'" style="background:none;border:none;color:rgba(255,255,255,.5);font-size:22px;cursor:pointer;padding:4px 8px;line-height:1">×</button>'
-    +'</div>'
-    +'<div id="playerListContent" style="padding:14px 16px"></div>'
-    +'</div>';
+// Impression fiches joueurs individuels (2 par ligne)
+window.printPlayerSheets = function(filterIds){
+  if(!ST.schedule.length){alert('Aucun programme généré.');return;}
+  const teams=filterIds?ST.teams.filter(t=>filterIds.includes(t.id)):ST.teams.slice(0,ST.cfg.n);
+  const sorted=[...teams].sort((a,b)=>a.name.localeCompare(b.name,'fr'));
+  let body=`<h1>👤 Fiches joueurs individuels — ${ST.cfg.n} équipes · ${ST.cfg.r} tours</h1>
+<div class="player-grid">`;
+  sorted.forEach(t=>{
+    body+=_playerSheetHTML(t,0); // Joueur 1
+    body+=_playerSheetHTML(t,1); // Joueur 2
+  });
+  body+=`</div>`;
+  _pOpenWindow('player_sheets','Fiches Joueurs — Interclub',body);
+};
+
+// Impression complète (fiches équipe + joueurs + classement)
+window.printAll = function(){
+  if(!ST.schedule.length){alert('Aucun programme généré.');return;}
+  const teams=[...ST.teams].slice(0,ST.cfg.n).sort((a,b)=>a.name.localeCompare(b.name,'fr'));
+  const st=computeStandings();
+  const med=['1er','2e','3e'];
+  const brd=['#d4a820','#909ab8','#c08050'];
+
+  let body=`<h1>📋 Fiches équipes — Interclub · ${ST.cfg.n} équipes · ${ST.cfg.r} tours</h1>
+<div class="sheet-grid">`;
+  teams.forEach(t=>{body+=_teamSheetHTML(t);});
+  body+=`</div>`;
+
+  body+=`<div style="break-before:page"><h1>👤 Fiches joueurs — Interclub</h1>
+<div class="player-grid">`;
+  teams.forEach(t=>{ body+=_playerSheetHTML(t,0); body+=_playerSheetHTML(t,1); });
+  body+=`</div></div>`;
+
+  body+=`<div class="rank-section"><h1>🏆 Classement — Interclub</h1>
+<div style="display:flex;gap:12px;margin-bottom:14px;flex-wrap:wrap">`;
+  st.slice(0,3).forEach((s,i)=>{ body+=`<div style="border:2px solid ${brd[i]};border-radius:8px;padding:10px 16px;text-align:center;min-width:120px"><div style="font-size:18px;font-weight:700;color:${brd[i]}">${med[i]}</div><div style="font-weight:700;font-size:14px">${s.name}</div><div style="font-size:22px;font-weight:900;color:#1e8c45">${s.pts}</div></div>`; });
+  body+=`</div><table><thead><tr><th>#</th><th style="text-align:left">Équipe</th><th>Club</th><th>J</th><th>V</th><th>N</th><th>D</th><th>BP</th><th>BC</th><th>+/-</th><th>Pts</th></tr></thead><tbody>`;
+  st.forEach((s,i)=>{const gd=s.gf-s.ga;body+=`<tr><td>${med[i]||i+1}</td><td style="text-align:left;font-weight:600">${s.name}</td><td style="color:#888">${s.club||'—'}</td><td>${s.played}</td><td class="win">${s.w}</td><td class="draw">${s.d}</td><td class="lose">${s.l}</td><td>${s.gf}</td><td>${s.ga}</td><td style="color:${gd>=0?'#1e8c45':'#c0281a'};font-weight:700">${gd>0?'+':''}${gd}</td><td class="pts">${s.pts}</td></tr>`;});
+  body+=`</tbody></table></div>`;
+
+  _pOpenWindow('all','Impression complète — Interclub Pickleball',body);
+};
+
+window.printPlanning = function(){
+  let body=`<h1>📋 Planning complet — ${ST.cfg.n} équipes · ${ST.cfg.r} tours</h1>`;
+  ST.schedule.forEach((rd,ri)=>{
+    const allSubs=[...(rd.subsH1||[]),...(rd.subsH2||[])];
+    body+=`<div style="margin-bottom:12px;break-inside:avoid">
+      <div style="background:#1a1410;color:#fff;padding:7px 12px;font-size:13px;font-weight:700">
+        Tour ${ri+1} · ${rd.roundTime}${allSubs.length?' · Exempt: '+allSubs.map(id=>pName(id)).join(', '):''}
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(${ST.cfg.halls},1fr);gap:0;border:1px solid #ccc;border-top:none">`;
+    const renderHallPrint=(waves,hall,label)=>{
+      if(!waves||!waves.length)return'';
+      let h=ST.cfg.halls===2?`<div style="background:#f0e8dc;padding:5px 10px;font-weight:700;font-size:11px">🏠 ${label}</div>`:'';
+      waves.forEach((wv,wi)=>{
+        if(waves.length>1) h+=`<div style="background:#f7f3ee;padding:3px 10px;font-size:10px;font-weight:700;color:#7a6a50">Vague ${wi+1} · ${wv.waveTime}</div>`;
+        wv.matches.forEach((m,mi)=>{ h+=`<div style="display:flex;align-items:center;padding:4px 10px;border-bottom:1px solid #e8e0d5;font-size:11px"><span style="color:#888;min-width:22px;font-weight:700">T${mi+1}</span><span style="flex:1;font-weight:600">${pName(m.tA)}</span><span style="padding:0 6px;color:#aaa">vs</span><span style="flex:1;font-weight:600">${pName(m.tB)}</span></div>`; });
+      });
+      return h;
+    };
+    body+=renderHallPrint(rd.wavesH1,1,'Salle 1');
+    body+=renderHallPrint(rd.wavesH2,2,'Salle 2');
+    body+=`</div></div>`;
+  });
+  _pOpenWindow('planning','Planning — Interclub Pickleball',body);
+};
+
+window.printFinal = function(){
+  const st=computeStandings();
+  const med=['1er','2e','3e'];
+  const brd=['#d4a820','#909ab8','#c08050'];
+  let body=`<h1>🏆 Classement Final — ${ST.cfg.n} équipes · ${ST.cfg.r} tours</h1>
+<div style="display:flex;gap:12px;margin-bottom:16px;flex-wrap:wrap">`;
+  st.slice(0,3).forEach((s,i)=>{body+=`<div style="border:2px solid ${brd[i]};border-radius:8px;padding:12px 18px;text-align:center"><div style="font-size:18px;font-weight:700;color:${brd[i]}">${med[i]}</div><div style="font-weight:700;font-size:15px;margin:5px 0">${s.name}</div><div style="color:#888;font-size:11px">${s.club||'—'}</div><div style="font-size:24px;font-weight:900;color:#1e8c45">${s.pts}</div><div style="font-size:11px;color:#888">${s.w}V · ${s.d}N · ${s.l}D</div></div>`;});
+  body+=`</div><table><thead><tr><th>#</th><th style="text-align:left">Équipe</th><th>Club</th><th>J</th><th>V</th><th>N</th><th>D</th><th>BP</th><th>BC</th><th>+/-</th><th>Pts</th></tr></thead><tbody>`;
+  st.forEach((s,i)=>{const gd=s.gf-s.ga;body+=`<tr><td>${med[i]||i+1}</td><td style="text-align:left;font-weight:600">${s.name}</td><td style="color:#888">${s.club||'—'}</td><td>${s.played}</td><td class="win">${s.w}</td><td class="draw">${s.d}</td><td class="lose">${s.l}</td><td>${s.gf}</td><td>${s.ga}</td><td style="color:${gd>=0?'#1e8c45':'#c0281a'};font-weight:700">${gd>0?'+':''}${gd}</td><td style="font-size:14px;font-weight:900;color:#1e8c45">${s.pts}</td></tr>`;});
+  body+=`</tbody></table>`;
+  _pOpenWindow('final','Classement Final — Interclub Pickleball',body);
+};
+
+// Modale de sélection d'équipes pour impression ciblée
+window.showPrintSelector = function(mode){
+  if(!ST.schedule.length){alert('Aucun programme généré.');return;}
+  let old=document.getElementById('printSelectorModal');if(old)old.remove();
+  const modal=document.createElement('div');
+  modal.id='printSelectorModal';
+  modal.style.cssText='position:fixed;inset:0;z-index:8000;background:rgba(0,0,0,.75);backdrop-filter:blur(5px);display:flex;align-items:flex-start;justify-content:center;padding:20px;overflow-y:auto';
+  const sortedTeams=[...ST.teams].slice(0,ST.cfg.n).sort((a,b)=>a.name.localeCompare(b.name,'fr'));
+  const modeLabel=mode==='team'?'fiches équipes':mode==='player'?'fiches joueurs':'tout imprimer';
+  modal.innerHTML=`<div style="max-width:520px;width:100%;background:#1a1a2e;border:1.5px solid rgba(122,220,255,.25);border-radius:16px;overflow:hidden">
+    <div style="background:linear-gradient(135deg,#0d1c30,#1a2e48);padding:16px 20px;display:flex;align-items:center;justify-content:space-between">
+      <div>
+        <div style="font-family:'Oswald',sans-serif;font-size:18px;font-weight:700;color:#7adcff;letter-spacing:1px">🖨 Sélection pour impression</div>
+        <div style="font-size:11px;color:rgba(255,255,255,.4);margin-top:3px">Mode : ${modeLabel}</div>
+      </div>
+      <button onclick="document.getElementById('printSelectorModal').remove()" style="background:none;border:none;color:rgba(255,255,255,.5);font-size:22px;cursor:pointer">×</button>
+    </div>
+    <div style="padding:16px">
+      <div style="display:flex;gap:8px;margin-bottom:12px">
+        <button onclick="selectAllTeams(true)" style="flex:1;padding:7px;background:rgba(122,220,255,.12);border:1px solid rgba(122,220,255,.3);border-radius:7px;color:#7adcff;cursor:pointer;font-size:12px">✓ Tout sélectionner</button>
+        <button onclick="selectAllTeams(false)" style="flex:1;padding:7px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.15);border-radius:7px;color:rgba(255,255,255,.6);cursor:pointer;font-size:12px">✗ Tout désélectionner</button>
+      </div>
+      <div id="printTeamList" style="max-height:320px;overflow-y:auto;display:grid;grid-template-columns:1fr 1fr;gap:6px">
+        ${sortedTeams.map(t=>`
+          <label style="display:flex;align-items:center;gap:8px;padding:9px 12px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.1);border-radius:8px;cursor:pointer;transition:all .15s"
+            onmouseover="this.style.borderColor='rgba(122,220,255,.4)'" onmouseout="this.style.borderColor='rgba(255,255,255,.1)'">
+            <input type="checkbox" value="${t.id}" checked style="width:16px;height:16px;accent-color:#7adcff;cursor:pointer">
+            <div>
+              <div style="font-weight:700;font-size:13px;color:#fff">${t.name}</div>
+              <div style="font-size:10px;color:rgba(255,255,255,.4)">${t.club||'—'} · Niv.${t.lv}</div>
+            </div>
+          </label>`).join('')}
+      </div>
+      <div style="margin-top:14px;display:flex;gap:8px">
+        <button onclick="launchPrint('${mode}')" style="flex:1;padding:11px;background:linear-gradient(135deg,#0d2030,#1a3a50);border:1.5px solid #4a7090;border-radius:8px;color:#7adcff;font-family:'Oswald',sans-serif;font-size:14px;font-weight:700;letter-spacing:.5px;cursor:pointer;text-transform:uppercase">🖨 Imprimer la sélection</button>
+        <button onclick="document.getElementById('printSelectorModal').remove()" style="padding:11px 20px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.15);border-radius:8px;color:rgba(255,255,255,.6);font-size:13px;cursor:pointer">Annuler</button>
+      </div>
+    </div>
+  </div>`;
   document.body.appendChild(modal);
-  modal.addEventListener('click', function(e){ if(e.target===modal) modal.style.display='none'; });
-  renderPlayerListModal();
+  modal.addEventListener('click',e=>{if(e.target===modal)modal.remove();});
 };
 
-function renderPlayerListModal(){
-  var el = document.getElementById('playerListContent');
-  if(!el) return;
-  var sorted = ST.players.slice(0, ST.cfg.n).sort(function(a,b){return a.name.localeCompare(b.name,'fr');});
-  el.innerHTML = sorted.map(function(p){
-    return '<button onclick="showPlayerProgram(\''+p.id+'\')" style="'
-      +'width:100%;display:flex;align-items:center;gap:12px;padding:11px 14px;margin-bottom:6px;'
-      +'background:linear-gradient(135deg,rgba(255,255,255,.04),rgba(255,255,255,.02));'
-      +'border:1px solid rgba(255,255,255,.1);border-radius:10px;'
-      +'color:#fff;cursor:pointer;text-align:left;transition:all .15s;'
-      +'" onmouseover="this.style.borderColor=\'rgba(122,220,255,.4)\';this.style.background=\'rgba(122,220,255,.07)\'"'
-      +' onmouseout="this.style.borderColor=\'rgba(255,255,255,.1)\';this.style.background=\'linear-gradient(135deg,rgba(255,255,255,.04),rgba(255,255,255,.02))\'">'
-      +'<span style="font-size:22px">'+(p.g==='F'?'👩':'👨')+'</span>'
-      +'<div style="flex:1">'
-      +'<div style="font-weight:700;font-size:14px">'+p.name+'</div>'
-      +'<div style="font-size:11px;color:rgba(255,255,255,.4);margin-top:1px">Niveau '+p.lv+' · '+p.g+'</div>'
-      +'</div>'
-      +'<span style="color:rgba(122,220,255,.6);font-size:18px">›</span>'
-      +'</button>';
-  }).join('');
-}
-
-window.showPlayerProgram = function(pid){
-  var p = ST.players.find(function(x){return x.id===pid;});
-  if(!p) return;
-  var rows = getPlayerSchedule(pid);
-  var modal = document.getElementById('playerListModal');
-  if(modal) modal.style.display='none';
-
-  // Supprimer ancienne modal programme si existe
-  var old = document.getElementById('playerProgramModal');
-  if(old) old.remove();
-
-  var rowsHtml = rows.map(function(row){
-    if(row.type==='sub'){
-      return '<div style="display:flex;align-items:center;gap:10px;padding:10px 14px;margin-bottom:6px;'
-        +'background:rgba(255,208,50,.06);border:1px solid rgba(255,208,50,.2);border-radius:10px">'
-        +'<div style="min-width:52px;text-align:center"><div style="font-size:11px;color:rgba(255,255,255,.4)">Tour</div>'
-        +'<div style="font-weight:900;font-size:16px;color:#ffd080">'+(row.ri+1)+'</div>'
-        +'<div style="font-size:10px;color:rgba(255,255,255,.35)">'+row.roundTime+'</div></div>'
-        +'<div style="width:1px;height:36px;background:rgba(255,255,255,.1)"></div>'
-        +'<div style="flex:1;text-align:center">'
-        +'<div style="font-size:13px;font-weight:700;color:#ffd080">🟡 Remplaçant</div>'
-        +'<div style="font-size:11px;color:rgba(255,255,255,.4);margin-top:2px">Au repos ce tour</div>'
-        +'</div></div>';
-    }
-    var done = row.myScore!==''&&row.oppScore!=='';
-    var result='', borderC='rgba(255,255,255,.1)', bgC='rgba(255,255,255,.03)', rc='rgba(255,255,255,.5)';
-    if(done){
-      var ms=+row.myScore, os=+row.oppScore;
-      if(ms>os){result='✅ Victoire';borderC='rgba(50,200,100,.35)';bgC='rgba(50,200,100,.07)';rc='#5ddc8e';}
-      else if(ms<os){result='❌ Défaite';borderC='rgba(220,80,80,.35)';bgC='rgba(220,80,80,.07)';rc='#dc7070';}
-      else{result='🟡 Nul';borderC='rgba(255,208,50,.35)';bgC='rgba(255,208,50,.07)';rc='#ffd080';}
-    }
-    return '<div style="display:flex;align-items:stretch;gap:10px;padding:10px 14px;margin-bottom:6px;'
-      +'background:'+bgC+';border:1px solid '+borderC+';border-radius:10px">'
-      +'<div style="min-width:52px;text-align:center">'
-      +'<div style="font-size:11px;color:rgba(255,255,255,.4)">Tour</div>'
-      +'<div style="font-weight:900;font-size:16px;color:#7adcff">'+(row.ri+1)+'</div>'
-      +'<div style="font-size:10px;color:rgba(255,255,255,.35)">'+row.waveTime+'</div>'
-      +'</div>'
-      +'<div style="width:1px;background:rgba(255,255,255,.1)"></div>'
-      +'<div style="flex:1;min-width:0">'
-      +'<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">'
-      +'<span style="font-size:11px;font-weight:700;background:rgba(70,120,200,.3);color:#a0c0ff;border-radius:4px;padding:1px 7px">'+row.court+'</span>'
-      +(row.early
-        ?'<span style="font-size:9px;background:rgba(50,80,200,.3);color:#8090e0;border-radius:3px;padding:1px 5px">⚡ Anticipé</span>'
-        :'<span style="font-size:10px;font-weight:700;background:rgba(112,64,176,.3);color:#c090f0;border-radius:4px;padding:1px 6px">'+(row.waveLabel&&row.waveLabel!=='-'?row.waveLabel:'V1')+'</span>')
-      +'</div>'
-      +'<div style="font-size:12px;margin-bottom:3px">'
-      +'<span style="color:rgba(255,255,255,.45);font-size:10px">Partenaire </span>'
-      +'<strong style="color:#fff">'+pName(row.partner)+'</strong></div>'
-      +'<div style="font-size:12px;color:rgba(255,255,255,.55)">'
-      +'<span style="font-size:10px;color:rgba(255,255,255,.35)">vs </span>'+pName(row.opp1)+' + '+pName(row.opp2)+'</div>'
-      +'</div>'
-      +'<div style="min-width:54px;text-align:center;display:flex;flex-direction:column;align-items:center;justify-content:center">'
-      +(done
-        ?'<div style="font-size:17px;font-weight:900;color:'+rc+'">'+row.myScore+' – '+row.oppScore+'</div>'
-         +'<div style="font-size:10px;color:'+rc+';margin-top:2px">'+result+'</div>'
-        :'<div style="font-size:14px;color:rgba(255,255,255,.25);font-weight:700">– –</div>')
-      +'</div></div>';
-  }).join('');
-
-  // Statistiques en temps réel
-  var pts=0,wins=0,draws=0,losses=0;
-  rows.forEach(function(row){
-    if(row.type==='match'&&row.myScore!==''&&row.oppScore!==''){
-      var ms=+row.myScore,os=+row.oppScore;
-      if(ms>os){wins++;pts+=3;}else if(ms<os){losses++;}else{draws++;pts+=1;}
-    }
-  });
-
-  var pm = document.createElement('div');
-  pm.id = 'playerProgramModal';
-  pm.style.cssText='position:fixed;inset:0;z-index:8001;background:rgba(0,0,0,.82);backdrop-filter:blur(5px);display:flex;align-items:flex-start;justify-content:center;padding:16px 12px;overflow-y:auto';
-  pm.innerHTML='<div style="max-width:480px;width:100%;background:#16202e;border:1.5px solid rgba(122,220,255,.25);border-radius:16px;overflow:hidden;margin:auto">'
-    // Header
-    +'<div style="background:linear-gradient(135deg,#0d1c30,#1a2e48);padding:16px 20px">'
-    +'<div style="display:flex;align-items:center;gap:14px">'
-    +'<span style="font-size:36px">'+(p.g==='F'?'👩':'👨')+'</span>'
-    +'<div style="flex:1">'
-    +'<div style="font-family:\'Oswald\',sans-serif;font-size:20px;font-weight:700;color:#fff;letter-spacing:.5px">'+p.name+'</div>'
-    +'<div style="font-size:11px;color:rgba(255,255,255,.4);margin-top:2px">Niveau '+p.lv+' · '+ST.cfg.r+' tours au programme</div>'
-    +'</div>'
-    +'<div style="display:flex;flex-direction:column;gap:6px">'
-    +'<button onclick="document.getElementById(\'playerProgramModal\').remove()" style="background:none;border:none;color:rgba(255,255,255,.5);font-size:22px;cursor:pointer;padding:2px 6px;line-height:1">×</button>'
-    +(isAdmin()?'<button onclick="printPlayerSchedule(\''+pid+'\')" title="Imprimer" style="background:none;border:1px solid rgba(255,255,255,.2);border-radius:6px;color:rgba(255,255,255,.6);font-size:13px;cursor:pointer;padding:3px 8px">🖨</button>':'')
-    +'</div></div>'
-    // Mini stats
-    +'<div style="display:flex;gap:8px;margin-top:12px">'
-    +'<div style="flex:1;text-align:center;background:rgba(255,255,255,.06);border-radius:8px;padding:7px 4px"><div style="font-size:18px;font-weight:900;color:#5ddc8e">'+pts+'</div><div style="font-size:9px;color:rgba(255,255,255,.4);text-transform:uppercase;letter-spacing:.5px">Pts</div></div>'
-    +'<div style="flex:1;text-align:center;background:rgba(50,200,100,.1);border-radius:8px;padding:7px 4px"><div style="font-size:18px;font-weight:900;color:#5ddc8e">'+wins+'</div><div style="font-size:9px;color:rgba(255,255,255,.4);text-transform:uppercase;letter-spacing:.5px">Victoires</div></div>'
-    +'<div style="flex:1;text-align:center;background:rgba(255,208,50,.08);border-radius:8px;padding:7px 4px"><div style="font-size:18px;font-weight:900;color:#ffd080">'+draws+'</div><div style="font-size:9px;color:rgba(255,255,255,.4);text-transform:uppercase;letter-spacing:.5px">Nuls</div></div>'
-    +'<div style="flex:1;text-align:center;background:rgba(220,80,80,.1);border-radius:8px;padding:7px 4px"><div style="font-size:18px;font-weight:900;color:#dc7070">'+losses+'</div><div style="font-size:9px;color:rgba(255,255,255,.4);text-transform:uppercase;letter-spacing:.5px">Défaites</div></div>'
-    +'</div></div>'
-    // Liste des matchs
-    +'<div style="padding:14px 14px 6px">'
-    +'<div style="font-size:11px;font-weight:700;color:rgba(255,255,255,.35);text-transform:uppercase;letter-spacing:.8px;margin-bottom:10px">Programme complet</div>'
-    +rowsHtml
-    +'</div>'
-    // Footer
-    +'<div style="padding:10px 14px;border-top:1px solid rgba(255,255,255,.08);display:flex;gap:8px">'
-    +'<button onclick="document.getElementById(\'playerProgramModal\').remove();showPlayerList()" style="flex:1;padding:10px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.15);border-radius:8px;color:rgba(255,255,255,.7);font-family:\'Oswald\',sans-serif;font-size:13px;letter-spacing:.5px;cursor:pointer;text-transform:uppercase">‹ Retour</button>'
-    +(isAdmin()?'<button onclick="printPlayerSchedule(\''+pid+'\')" style="flex:1;padding:10px;background:linear-gradient(135deg,#0d2030,#1a3a50);border:1.5px solid #4a7090;border-radius:8px;color:#7adcff;font-family:\'Oswald\',sans-serif;font-size:13px;letter-spacing:.5px;cursor:pointer;text-transform:uppercase">🖨 Imprimer</button>':'')
-    +'</div></div>';
-
-  document.body.appendChild(pm);
-  pm.addEventListener('click', function(e){ if(e.target===pm) pm.remove(); });
+window.selectAllTeams=function(v){document.querySelectorAll('#printTeamList input[type=checkbox]').forEach(cb=>{cb.checked=v;});};
+window.launchPrint=function(mode){
+  const ids=[...document.querySelectorAll('#printTeamList input[type=checkbox]:checked')].map(cb=>cb.value);
+  if(!ids.length){alert('Sélectionnez au moins une équipe.');return;}
+  document.getElementById('printSelectorModal').remove();
+  if(mode==='team') printTeamSheets(ids);
+  else if(mode==='player') printPlayerSheets(ids);
+  else printAll();
 };
 
-// ── Impression tous les joueurs (admin) ────────────────────
+window.reloadApp = function(){
+  if(!confirm('Recharger la dernière version ?'))return;
+  location.replace(location.href.split('?')[0]+'?v='+Date.now());
+};
+
+// ══════════════════════════════════════════════════════════
+// RÈGLEMENT
+// ══════════════════════════════════════════════════════════
 window.printRules = function(){
   var sections = document.querySelectorAll('#pageR .card');
   if(!sections.length){ alert('Règlement introuvable.'); return; }
