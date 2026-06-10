@@ -334,7 +334,11 @@ window.goTo = function(n){
   updateSpectatorNav(n);
   window.scrollTo(0,0);
   if(n===2) renderTeams();
-  if(n===3){ if(buildSchedule()) renderGen(); else renderGen(); }
+  if(n===3){
+    // Ne régénérer automatiquement que si aucun planning n'existe encore
+    if(!ST.schedule.length){ if(buildSchedule()) renderGen(); else renderGen(); }
+    else renderGen();
+  }
   if(n===4) renderTournament();
   if(n===5) renderFinal();
 };
@@ -405,9 +409,13 @@ function getCfg(){
   const halls = +document.getElementById('cfg_halls').value;
   const morning = +document.getElementById('cfg_morning').value;
   const afternoon = +document.getElementById('cfg_afternoon').value;
+  const t1 = Math.max(1, +document.getElementById('cfg_t').value || 8);
+  const t2el = document.getElementById('cfg_t2');
+  const t2 = halls===2 ? Math.max(1, +(t2el ? t2el.value : t1) || t1) : t1;
   return {
     n:     +document.getElementById('cfg_n').value,
-    t:     +document.getElementById('cfg_t').value,
+    t:     t1,
+    t2:    t2,
     halls: halls,
     matchesMorning:   morning,
     matchesAfternoon: afternoon,
@@ -424,9 +432,10 @@ function syncCfgForm(){
   const c=ST.cfg;
   const setV=(id,v)=>{ const el=document.getElementById(id); if(el) el.value=v; };
   const setC=(id,v)=>{ const el=document.getElementById(id); if(el) el.checked=v; };
-  setV('cfg_n',c.n); setV('cfg_t',c.t); setV('cfg_halls',c.halls||1);
-  setV('cfg_morning',c.matchesMorning||3);
+  setV('cfg_n',c.n); setV('cfg_t',c.t||8); setV('cfg_halls',c.halls||1);
   setV('cfg_afternoon',c.matchesAfternoon||4);
+  const t2el=document.getElementById('cfg_t2'); if(t2el) t2el.value=c.t2||c.t||8;
+  setV('cfg_morning',c.matchesMorning||3);
   setV('cfg_mt',c.mt); setV('cfg_tt',c.tt);
   setV('cfg_lunchdur',c.lunchDuration||60);
   setV('cfg_start',c.start); setV('cfg_lunchstart',c.lunchStart||'12:30');
@@ -442,23 +451,31 @@ window.saveCfgAndNext = async function(){
 };
 window.onCfgChange = function(){
   const c=getCfg();
+  // Afficher/masquer salle 2 et adapter libellé salle 1
+  const t2row = document.getElementById('cfg_t2_row');
+  const t1lbl = document.getElementById('cfg_t_label');
+  if(t2row) t2row.style.display = c.halls===2 ? '' : 'none';
+  if(t1lbl) t1lbl.textContent = c.halls===2 ? 'Terrains salle 1' : 'Terrains (salle unique)';
   // Coupure déjeuner
   const lunchRow = document.getElementById('lunchRow');
   if(lunchRow) lunchRow.style.display = c.lunchBreak ? '' : 'none';
   // Résumé
   const totalMatches = c.matchesMorning + c.matchesAfternoon;
-  const teamsPerHall = Math.floor(c.n / c.halls);
-  const courts = c.halls===2 ? (c.t*2) : c.t;
+  const teamsPerHall = c.halls===2 ? Math.ceil(c.n/2) : c.n;
+  const courts = c.halls===2 ? (c.t + c.t2) : c.t;
   const morningEnd = addMinutes(c.start, c.matchesMorning * (c.mt + c.tt) - c.tt);
   let afternoonStartTime = c.lunchBreak ? addMinutes(c.lunchStart, c.lunchDuration||60) : morningEnd;
   const afternoonEnd = addMinutes(afternoonStartTime, c.matchesAfternoon * (c.mt + c.tt) - c.tt);
+  const hallInfo = c.halls===2
+    ? `Salle 1: <strong>${c.t}</strong> terrains · Salle 2: <strong>${c.t2}</strong> terrains (total: ${courts})`
+    : `<strong>${c.t}</strong> terrain${c.t>1?'s':''}`;
   const el = document.getElementById('cfgPreview');
   if(el){
     el.className='info info-g';
-    el.innerHTML=`<strong>${c.n} équipes</strong> · <strong>${c.halls} salle${c.halls>1?'s':''}</strong> · <strong>${courts} terrains au total</strong><br>
+    el.innerHTML=`<strong>${c.n} équipes</strong> · <strong>${c.halls} salle${c.halls>1?'s':''}</strong> · ${hallInfo}<br>
     Matin : <strong>${c.matchesMorning} matchs</strong> (${c.start} → ${morningEnd})${c.lunchBreak?` · Déjeuner ${c.lunchStart} (${c.lunchDuration||60} min)`:''}<br>
     Après-midi : <strong>${c.matchesAfternoon} matchs</strong> (${afternoonStartTime} → ${afternoonEnd})<br>
-    Total : <strong>${totalMatches} matchs/équipe</strong> · ~${teamsPerHall} équipes/salle`;
+    Total : <strong>${totalMatches} matchs/équipe</strong>${c.halls===2?` · ~${teamsPerHall} équipes/salle`:''}`;
   }
 };
 
@@ -595,7 +612,8 @@ function tClub(id){ const t=tObj(id); return t?t.club:''; }
 
 function buildSchedule(){
   const cfg=getCfg();
-  if(ST.teams.length < 4){ alert('Il faut au moins 4 équipes.'); return false; }
+  if(ST.teams.length < 2){ alert('Il faut au moins 2 équipes.'); return false; }
+  cfg.t2 = cfg.t2 || cfg.t; // fallback si t2 non défini
   ST.cfg = cfg;
 
   const totalRounds = cfg.matchesMorning + cfg.matchesAfternoon;
@@ -697,8 +715,8 @@ function buildSchedule(){
     return bestMatches || [];
   }
 
-  const courts1 = cfg.halls===2 ? cfg.t : cfg.t;
-  const courts2 = cfg.halls===2 ? cfg.t : 0;
+  const courts1 = cfg.t;
+  const courts2 = cfg.halls===2 ? (cfg.t2||cfg.t) : 0;
   const hall1Rounds = buildHallSchedule(hall1Teams, courts1, cfg.halls===2?'Salle 1':'');
   const hall2Rounds = cfg.halls===2 ? buildHallSchedule(hall2Teams, courts2, 'Salle 2') : [];
 
@@ -773,8 +791,11 @@ function renderGen(){
       if(rd.hall2&&rd.hall2.bye) byeCount[rd.hall2.bye]=(byeCount[rd.hall2.bye]||0)+1;
     });
     const totalByes=Object.values(byeCount).reduce((s,v)=>s+v,0);
+    const courtsInfo = cfg.halls===2
+      ? `S1:${cfg.t}+S2:${cfg.t2||cfg.t}=${cfg.t+(cfg.t2||cfg.t)} terrains`
+      : `${cfg.t} terrain${cfg.t>1?'s':''}`;
     gib.className='info info-g';
-    gib.innerHTML=`✅ <strong>${ST.teams.slice(0,cfg.n).length} équipes</strong> · <strong>${cfg.halls} salle${cfg.halls>1?'s':''}</strong> · <strong>${cfg.t*(cfg.halls)} terrains</strong><br>
+    gib.innerHTML=`✅ <strong>${ST.teams.slice(0,cfg.n).length} équipes</strong> · <strong>${cfg.halls} salle${cfg.halls>1?'s':''}</strong> · <strong>${courtsInfo}</strong><br>
     Matin : <strong>${cfg.matchesMorning} matchs</strong> · Après-midi : <strong>${cfg.matchesAfternoon} matchs</strong><br>
     Matchs/équipe : <strong>${minPlay}–${maxPlay}</strong>${totalByes>0?` · ${totalByes} exemption(s)`:' · Toutes jouent'}<br>
     Total matchs : <strong>${totalMatchCount}</strong> · ${cfg.start} → ${endTime}`;
@@ -823,6 +844,7 @@ function renderGen(){
 
 window.regenerate = async function(){
   if(!isAdmin()) return;
+  ST.schedule = []; // force rebuild
   if(buildSchedule()){ await saveTournament({ schedule: ST.schedule, activeRound:0 }); renderGen(); }
 };
 window.startTournament = async function(){
@@ -1768,7 +1790,7 @@ input[type=checkbox]{ width:auto;margin-right:6px; }
         <div>
           <label>Nombre d'équipes</label>
           <select id="cfg_n" onchange="onCfgChange()">
-            <option value="30">30 équipes</option><option value="32" selected>32 équipes</option><option value="34">34</option><option value="36">36</option><option value="38">38</option><option value="40">40 équipes</option><option value="42">42</option><option value="44">44</option><option value="46">46</option><option value="48">48 équipes</option><option value="50">50</option><option value="52">52</option><option value="54">54</option><option value="56">56</option><option value="58">58</option><option value="60">60 équipes</option><option value="64">64</option><option value="68">68</option><option value="72">72</option><option value="76">76</option><option value="80">80 équipes</option><option value="84">84</option><option value="88">88</option><option value="92">92</option><option value="96">96</option><option value="100">100 équipes</option>
+            <option value="2">2 équipes</option><option value="3">3</option><option value="4">4</option><option value="5">5</option><option value="6">6</option><option value="7">7</option><option value="8">8</option><option value="9">9</option><option value="10">10</option><option value="11">11</option><option value="12">12</option><option value="13">13</option><option value="14">14</option><option value="15">15</option><option value="16">16</option><option value="17">17</option><option value="18">18</option><option value="19">19</option><option value="20">20</option><option value="21">21</option><option value="22">22</option><option value="23">23</option><option value="24">24</option><option value="25">25</option><option value="26">26</option><option value="27">27</option><option value="28">28</option><option value="29">29</option><option value="30">30</option><option value="31">31</option><option value="32" selected>32</option><option value="33">33</option><option value="34">34</option><option value="35">35</option><option value="36">36</option><option value="37">37</option><option value="38">38</option><option value="39">39</option><option value="40">40</option><option value="41">41</option><option value="42">42</option><option value="43">43</option><option value="44">44</option><option value="45">45</option><option value="46">46</option><option value="47">47</option><option value="48">48</option><option value="49">49</option><option value="50">50 équipes</option>
           </select>
         </div>
         <div>
@@ -1779,10 +1801,12 @@ input[type=checkbox]{ width:auto;margin-right:6px; }
           </select>
         </div>
         <div>
-          <label>Terrains par salle</label>
-          <select id="cfg_t" onchange="onCfgChange()">
-            <option value="4">4 terrains</option><option value="5">5 terrains</option><option value="6">6 terrains</option><option value="7">7 terrains</option><option value="8" selected>8 terrains</option><option value="10">10 terrains</option><option value="12">12 terrains</option><option value="16">16 terrains</option>
-          </select>
+          <label id="cfg_t_label">Terrains (salle unique)</label>
+          <input type="number" id="cfg_t" value="8" min="1" max="30" step="1" onchange="onCfgChange()" placeholder="ex: 8">
+        </div>
+        <div id="cfg_t2_row" style="display:none">
+          <label>Terrains salle 2</label>
+          <input type="number" id="cfg_t2" value="8" min="1" max="30" step="1" onchange="onCfgChange()" placeholder="ex: 8">
         </div>
       </div>
     </div>
