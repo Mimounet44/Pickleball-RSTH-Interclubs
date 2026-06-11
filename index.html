@@ -677,6 +677,7 @@ function buildSchedule(){
 // PAGE 3 — PLANNING PREVIEW
 // ══════════════════════════════════════════════════════════
 function renderGen(){
+  _ensureRoundTimes();
   const cfg=getCfg();
   const el=document.getElementById('schedPreview'); if(!el) return;
   if(!ST.schedule.length){
@@ -937,12 +938,37 @@ window.setRound = async function(r){
 // ══════════════════════════════════════════════════════════
 function renderTournament(){ renderRoundTabs(); renderMatches(); renderSubInfo(); renderMiniStandings(); updateTimerDisplay(); checkDone(); }
 
+// Recalcule roundTime pour toutes les vagues du schedule depuis ST.cfg
+// Utilisé quand le schedule est chargé depuis Firebase sans horaires (anciens formats)
+function _ensureRoundTimes(){
+  const c = ST.cfg;
+  if(!c || !ST.schedule.length) return;
+  const mt    = c.mt    || 15;
+  const tt    = c.tt    || 3;
+  const start = c.start || '09:00';
+  const lunchStart   = c.lunchStart   || '12:30';
+  const lunchDuration= c.lunchDuration|| 60;
+  const lunchBreak   = c.lunchBreak   !== false;
+  const morningCount = c.matchesMorning   || ST.schedule.filter(r=>r.session==='morning').length   || 3;
+  const morningEnd   = addMinutes(start, morningCount*(mt+tt)-tt);
+  const afternoonStart = lunchBreak
+    ? addMinutes(lunchStart, lunchDuration)
+    : morningEnd;
+  ST.schedule.forEach(rd=>{
+    if(rd.roundTime && rd.roundTime !== 'undefined' && !rd.roundTime.includes('NaN')) return;
+    const sessStart = rd.session==='afternoon' ? afternoonStart : start;
+    const idx = rd.posInSession ?? rd.idx ?? 0;
+    rd.roundTime = addMinutes(sessStart, idx*(mt+tt));
+  });
+}
+
 function renderRoundTabs(){
+  _ensureRoundTimes();
   const el=document.getElementById('rTabs'); if(!el) return;
   el.innerHTML=ST.schedule.map((rd,r)=>{
     const d=isRoundDone(r);
     const sessionLabel = rd.session==='morning'?'☀️':'🌤️';
-    return `<button class="rtab ${r===ST.activeRound?'active':''} ${d?'done':''}" onclick="setRound(${r})">${sessionLabel} Tour ${r+1}${d?' ✓':''}<span class="rtab-time">${rd.roundTime}</span></button>`;
+    return `<button class="rtab ${r===ST.activeRound?'active':''} ${d?'done':''}" onclick="setRound(${r})">${sessionLabel} Tour ${r+1}${d?' ✓':''}<span class="rtab-time">${rd.roundTime||''}</span></button>`;
   }).join('');
 }
 
