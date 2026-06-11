@@ -407,23 +407,16 @@ window.toggleRules = function(){
 // PAGE 1 — CONFIG — vague unique, nb vagues auto
 // ══════════════════════════════════════════════════════════
 
-// Calcule le nb de vagues auto selon N équipes et terrains disponibles
-// Chaque vague fait jouer floor(N/2) matchs en parallèle sur les terrains
-// On vise ~5 matchs par équipe au total (répartis matin/PM)
-function _calcAutoWaves(n, t1, t2, halls){
+// Calcule le nb de vagues auto selon N équipes, terrains et matchs cibles par équipe
+function _calcAutoWaves(n, t1, t2, halls, targetMatches){
   const totalCourts = halls===2 ? t1+t2 : t1;
-  // Matchs simultanés par vague = min(totalCourts, floor(n/2))
   const matchesPerWave = Math.min(totalCourts, Math.floor(n/2));
-  if(matchesPerWave===0) return {morning:1, afternoon:1};
-  // Chaque équipe joue dans ~matchesPerWave*2/n équipes par vague
-  // On cible 5 matchs par équipe → total vagues = ceil(n*5 / (matchesPerWave*2))
-  // Plafonné à 10 vagues totales
-  const targetMatches = Math.max(4, Math.round(n/2)); // ~n/2 matchs par équipe
-  const totalWaves = Math.min(10, Math.max(2, Math.ceil(n * targetMatches / (matchesPerWave * 2))));
-  // Répartir 60% matin / 40% PM, minimum 1 chacun
+  if(matchesPerWave===0) return {morning:1, afternoon:1, matchesPerWave:0, totalWaves:2};
+  const target = Math.max(1, targetMatches||5);
+  const totalWaves = Math.min(20, Math.max(2, Math.ceil(n * target / (matchesPerWave * 2))));
   const morning   = Math.max(1, Math.round(totalWaves * 0.6));
   const afternoon = Math.max(1, totalWaves - morning);
-  return { morning, afternoon };
+  return { morning, afternoon, matchesPerWave, totalWaves };
 }
 
 function getCfg(){
@@ -432,12 +425,13 @@ function getCfg(){
   const t1      = +(document.getElementById('cfg_t1')?.value||8);
   const t2      = +(document.getElementById('cfg_t2')?.value||8);
   const wMode   = document.getElementById('cfg_wave_mode')?.value || 'auto';
+  const targetMatchesPerTeam = +(document.getElementById('cfg_matches_per_team')?.value||5);
   let morning, afternoon;
   if(wMode==='manual'){
     morning   = +(document.getElementById('cfg_morning')?.value||3);
     afternoon = +(document.getElementById('cfg_afternoon')?.value||4);
   } else {
-    const auto = _calcAutoWaves(n, t1, t2, halls);
+    const auto = _calcAutoWaves(n, t1, t2, halls, targetMatchesPerTeam);
     morning   = auto.morning;
     afternoon = auto.afternoon;
   }
@@ -461,6 +455,7 @@ function getCfg(){
     matchesMorning:   morning,
     matchesAfternoon: afternoon,
     halls, t1, t2,
+    targetMatchesPerTeam: targetMatchesPerTeam,
     waves,
     t: t1,
   };
@@ -486,10 +481,11 @@ function syncCfgForm(){
   setV('cfg_halls', halls);
   setV('cfg_t1', t1);
   setV('cfg_t2', t2);
+  setV('cfg_matches_per_team', c.targetMatchesPerTeam||5);
   // Mode manuel si cfg a des vagues avec des comptes différents
   const hasMorning   = c.matchesMorning   != null;
   const hasAfternoon = c.matchesAfternoon != null;
-  const auto = _calcAutoWaves(c.n||32, t1, t2, halls);
+  const auto = _calcAutoWaves(c.n||32, t1, t2, halls, c.targetMatchesPerTeam||5);
   const isAuto = !hasMorning || (c.matchesMorning===auto.morning && c.matchesAfternoon===auto.afternoon);
   setV('cfg_wave_mode', isAuto ? 'auto' : 'manual');
   if(!isAuto){
@@ -528,20 +524,24 @@ window.onCfgChange = function(){
   const n  = +(document.getElementById('cfg_n')?.value||32);
   const t1 = +(document.getElementById('cfg_t1')?.value||8);
   const t2 = +(document.getElementById('cfg_t2')?.value||8);
+  const targetMPT = +(document.getElementById('cfg_matches_per_team')?.value||5);
   let morning, afternoon;
   if(wMode==='manual'){
     morning   = +(document.getElementById('cfg_morning')?.value||3);
     afternoon = +(document.getElementById('cfg_afternoon')?.value||4);
   } else {
-    const auto = _calcAutoWaves(n, t1, t2, halls);
+    const auto = _calcAutoWaves(n, t1, t2, halls, targetMPT);
     morning   = auto.morning;
     afternoon = auto.afternoon;
-    // Mettre à jour les inputs cachés pour cohérence
     const em = document.getElementById('cfg_morning');
     const ea = document.getElementById('cfg_afternoon');
     if(em) em.value = morning;
     if(ea) ea.value = afternoon;
   }
+
+  // Afficher/masquer input matchs/équipe (uniquement en mode auto)
+  const mptRow = document.getElementById('cfg_mpt_row');
+  if(mptRow) mptRow.style.display = wMode==='auto' ? '' : 'none';
 
   // Info auto
   const infoEl = document.getElementById('wave_auto_info');
@@ -551,9 +551,8 @@ window.onCfgChange = function(){
     const totalWaves = morning + afternoon;
     infoEl.style.display = '';
     infoEl.innerHTML = wMode==='auto'
-      ? `🤖 <strong>${totalWaves} vagues calculées automatiquement</strong> (${morning} matin + ${afternoon} après-midi)<br>
-         ${halls===2?`2 salles · ${t1} + ${t2} = <strong>${totalCourts} terrains</strong>`:`<strong>${t1} terrains</strong>`} · ${matchesPerWave} matchs simultanés par vague · ~${Math.round(n*matchesPerWave*2/n)} matchs/équipe`
-      : `✏️ Mode manuel : <strong>${morning} vagues matin</strong> + <strong>${afternoon} vagues après-midi</strong> = ${totalWaves} vagues`;
+      ? `🤖 <strong>${totalWaves} vagues calculées</strong> (${morning} matin + ${afternoon} après-midi) · ${halls===2?`${t1}+${t2}=<strong>${totalCourts} terrains</strong>`:`<strong>${t1} terrains</strong>`} · <strong>${matchesPerWave} matchs/vague</strong> · cible <strong>${targetMPT} matchs/équipe</strong>`
+      : `✏️ Mode manuel : <strong>${morning} vagues matin</strong> + <strong>${afternoon} vagues après-midi</strong> = ${morning+afternoon} vagues`;
   }
 
   // Preview horaires
@@ -1835,13 +1834,17 @@ input[type=checkbox]{ width:auto;margin-right:6px; }
             <option value="manual">✏️ Manuel</option>
           </select>
         </div>
+        <div id="cfg_mpt_row">
+          <label>Matchs par équipe</label>
+          <input type="number" id="cfg_matches_per_team" value="5" min="1" max="20" oninput="onCfgChange()">
+        </div>
         <div id="cfg_morning_row" style="display:none">
           <label>Vagues matin</label>
-          <input type="number" id="cfg_morning" value="3" min="1" max="10" oninput="onCfgChange()">
+          <input type="number" id="cfg_morning" value="3" min="1" max="20" oninput="onCfgChange()">
         </div>
         <div id="cfg_afternoon_row" style="display:none">
           <label>Vagues après-midi</label>
-          <input type="number" id="cfg_afternoon" value="4" min="1" max="10" oninput="onCfgChange()">
+          <input type="number" id="cfg_afternoon" value="4" min="1" max="20" oninput="onCfgChange()">
         </div>
       </div>
 
