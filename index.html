@@ -404,30 +404,53 @@ window.toggleRules = function(){
 };
 
 // ══════════════════════════════════════════════════════════
-// PAGE 1 — CONFIG — système de VAGUES
-// Chaque vague : terrains S1, terrains S2, nb équipes S1, nb équipes S2
-// Les équipes peuvent changer de salle entre vagues
+// PAGE 1 — CONFIG — vague unique, nb vagues auto
 // ══════════════════════════════════════════════════════════
+
+// Calcule le nb de vagues auto selon N équipes et terrains disponibles
+// Chaque vague fait jouer floor(N/2) matchs en parallèle sur les terrains
+// On vise ~5 matchs par équipe au total (répartis matin/PM)
+function _calcAutoWaves(n, t1, t2, halls){
+  const totalCourts = halls===2 ? t1+t2 : t1;
+  // Matchs simultanés par vague = min(totalCourts, floor(n/2))
+  const matchesPerWave = Math.min(totalCourts, Math.floor(n/2));
+  if(matchesPerWave===0) return {morning:1, afternoon:1};
+  // Chaque équipe joue dans ~matchesPerWave*2/n équipes par vague
+  // On cible 5 matchs par équipe → total vagues = ceil(n*5 / (matchesPerWave*2))
+  // Plafonné à 10 vagues totales
+  const targetMatches = Math.max(4, Math.round(n/2)); // ~n/2 matchs par équipe
+  const totalWaves = Math.min(10, Math.max(2, Math.ceil(n * targetMatches / (matchesPerWave * 2))));
+  // Répartir 60% matin / 40% PM, minimum 1 chacun
+  const morning   = Math.max(1, Math.round(totalWaves * 0.6));
+  const afternoon = Math.max(1, totalWaves - morning);
+  return { morning, afternoon };
+}
+
 function getCfg(){
-  const morning   = +document.getElementById('cfg_morning').value   || 3;
-  const afternoon = +document.getElementById('cfg_afternoon').value || 4;
-  const waves=[];
+  const n       = +document.getElementById('cfg_n').value || 32;
+  const halls   = +(document.getElementById('cfg_halls')?.value||1);
+  const t1      = +(document.getElementById('cfg_t1')?.value||8);
+  const t2      = +(document.getElementById('cfg_t2')?.value||8);
+  const wMode   = document.getElementById('cfg_wave_mode')?.value || 'auto';
+  let morning, afternoon;
+  if(wMode==='manual'){
+    morning   = +(document.getElementById('cfg_morning')?.value||3);
+    afternoon = +(document.getElementById('cfg_afternoon')?.value||4);
+  } else {
+    const auto = _calcAutoWaves(n, t1, t2, halls);
+    morning   = auto.morning;
+    afternoon = auto.afternoon;
+  }
+  // Construire le tableau waves — même config pour toutes les vagues
+  const waves = [];
   ['morning','afternoon'].forEach(sess=>{
     const count = sess==='morning' ? morning : afternoon;
-    const pfx   = sess==='morning' ? 'm' : 'a';
     for(let i=0;i<count;i++){
-      const halls = +(document.getElementById(`wv_halls_${pfx}${i}`)?.value||1);
-      waves.push({
-        session:sess, idx:i, halls,
-        t1:     +(document.getElementById(`wv_t1_${pfx}${i}`)?.value||8),
-        t2:     +(document.getElementById(`wv_t2_${pfx}${i}`)?.value||8),
-        teams1: +(document.getElementById(`wv_teams1_${pfx}${i}`)?.value||0),
-        teams2: +(document.getElementById(`wv_teams2_${pfx}${i}`)?.value||0),
-      });
+      waves.push({ session:sess, idx:i, halls, t1, t2, teams1:0, teams2:0 });
     }
   });
   return {
-    n:              +document.getElementById('cfg_n').value,
+    n,
     mt:             +(document.getElementById('cfg_mt')?.value||15),
     tt:             +(document.getElementById('cfg_tt')?.value||3),
     lunchBreak:     document.getElementById('cfg_lunch')?.checked!==false,
@@ -437,98 +460,41 @@ function getCfg(){
     bal:            document.getElementById('cfg_bal')?.value||'level',
     matchesMorning:   morning,
     matchesAfternoon: afternoon,
+    halls, t1, t2,
     waves,
-    halls: waves[0]?.halls||1,
-    t: waves[0]?.t1||8,
+    t: t1,
   };
 }
 
-// Cache des valeurs saisies dans les inputs de vague — évite l'écrasement à chaque onCfgChange
-const _waveCache = {};
-
-function _saveWaveCache(morning, afternoon){
-  ['morning','afternoon'].forEach(sess=>{
-    const cnt  = sess==='morning' ? morning : afternoon;
-    const pfx  = sess==='morning' ? 'm' : 'a';
-    for(let i=0;i<cnt;i++){
-      const wId = `${pfx}${i}`;
-      const h  = document.getElementById(`wv_halls_${wId}`);
-      const t1 = document.getElementById(`wv_t1_${wId}`);
-      const t2 = document.getElementById(`wv_t2_${wId}`);
-      const e1 = document.getElementById(`wv_teams1_${wId}`);
-      const e2 = document.getElementById(`wv_teams2_${wId}`);
-      if(h||t1) _waveCache[wId] = {
-        halls:  h  ? +h.value  : (_waveCache[wId]?.halls  || 1),
-        t1:     t1 ? +t1.value : (_waveCache[wId]?.t1     || 8),
-        t2:     t2 ? +t2.value : (_waveCache[wId]?.t2     || 8),
-        teams1: e1 ? +e1.value : (_waveCache[wId]?.teams1 || 0),
-        teams2: e2 ? +e2.value : (_waveCache[wId]?.teams2 || 0),
-      };
-    }
-  });
-}
-
-function renderWaveInputs(session, count){
-  const pfx   = session==='morning' ? 'm' : 'a';
-  const label = session==='morning' ? '☀️ Vague matin' : '🌤️ Vague AM';
-  let html='';
-  for(let i=0;i<count;i++){
-    const wId  = `${pfx}${i}`;
-    // Priorité : cache live > ST.cfg.waves > défauts
-    const cached = _waveCache[wId];
-    const saved  = Array.isArray(ST.cfg?.waves)
-      ? ST.cfg.waves.find(w=>w.session===session&&w.idx===i)
-      : null;
-    const defH      = cached?.halls  ?? saved?.halls  ?? 1;
-    const defT1     = cached?.t1     ?? saved?.t1     ?? 8;
-    const defT2     = cached?.t2     ?? saved?.t2     ?? 8;
-    const defTeams1 = cached?.teams1 ?? saved?.teams1 ?? 0;
-    const defTeams2 = cached?.teams2 ?? saved?.teams2 ?? 0;
-    html+=`<div style="background:var(--s2);border:1px solid var(--bdr);border-radius:8px;padding:12px 14px;margin-bottom:8px">
-      <div style="font-family:'Oswald',sans-serif;font-size:13px;letter-spacing:.6px;color:var(--blu);margin-bottom:10px">${label} ${i+1}</div>
-      <div class="fr">
-        <div><label>Salles</label>
-          <select id="wv_halls_${wId}" onchange="onCfgChange()">
-            <option value="1" ${defH===1?'selected':''}>1 salle</option>
-            <option value="2" ${defH===2?'selected':''}>2 salles</option>
-          </select></div>
-        <div><label>Terrains salle 1</label>
-          <input type="number" id="wv_t1_${wId}" value="${defT1}" min="1" max="30" oninput="onCfgChange()"></div>
-        <div id="wv_t2row_${wId}" style="${defH===2?'':'display:none'}">
-          <label>Terrains salle 2</label>
-          <input type="number" id="wv_t2_${wId}" value="${defT2}" min="1" max="30" oninput="onCfgChange()"></div>
-      </div>
-      <div class="fr" style="margin-top:8px">
-        <div><label>Éq. salle 1 <span style="font-weight:400;text-transform:none;font-size:10px">(0=auto)</span></label>
-          <input type="number" id="wv_teams1_${wId}" value="${defTeams1}" min="0" max="60" oninput="onCfgChange()"></div>
-        <div id="wv_teams2row_${wId}" style="${defH===2?'':'display:none'}">
-          <label>Éq. salle 2 <span style="font-weight:400;text-transform:none;font-size:10px">(0=auto)</span></label>
-          <input type="number" id="wv_teams2_${wId}" value="${defTeams2}" min="0" max="60" oninput="onCfgChange()"></div>
-      </div></div>`;
-  }
-  return html;
-}
-
 function syncCfgForm(){
-  const c=ST.cfg;
+  const c = ST.cfg;
   const setV=(id,v)=>{ const el=document.getElementById(id); if(el) el.value=v; };
   const setC=(id,v)=>{ const el=document.getElementById(id); if(el) el.checked=v; };
-  setV('cfg_n',c.n);
-  setV('cfg_morning',c.matchesMorning||3);
-  setV('cfg_afternoon',c.matchesAfternoon||4);
-  setV('cfg_mt',c.mt||15); setV('cfg_tt',c.tt||3);
-  setV('cfg_lunchdur',c.lunchDuration||60);
-  setV('cfg_start',c.start||'09:00');
-  setV('cfg_lunchstart',c.lunchStart||'12:30');
-  setV('cfg_bal',c.bal||'level');
-  setC('cfg_lunch',c.lunchBreak!==false);
-  // Pré-charger le cache depuis ST.cfg.waves pour que les inputs soient corrects
-  if(Array.isArray(c.waves)){
-    c.waves.forEach(w=>{
-      const pfx = w.session==='morning'?'m':'a';
-      const wId = `${pfx}${w.idx}`;
-      _waveCache[wId] = { halls:w.halls||1, t1:w.t1||8, t2:w.t2||8, teams1:w.teams1||0, teams2:w.teams2||0 };
-    });
+  setV('cfg_n', c.n);
+  setV('cfg_mt', c.mt||15);
+  setV('cfg_tt', c.tt||3);
+  setV('cfg_lunchdur', c.lunchDuration||60);
+  setV('cfg_start', c.start||'09:00');
+  setV('cfg_lunchstart', c.lunchStart||'12:30');
+  setV('cfg_bal', c.bal||'level');
+  setC('cfg_lunch', c.lunchBreak!==false);
+  // Terrains depuis la première vague ou depuis c.t1
+  const firstWave = Array.isArray(c.waves) ? c.waves[0] : null;
+  const halls  = c.halls  || firstWave?.halls  || 1;
+  const t1     = c.t1     || firstWave?.t1     || 8;
+  const t2     = c.t2     || firstWave?.t2     || 8;
+  setV('cfg_halls', halls);
+  setV('cfg_t1', t1);
+  setV('cfg_t2', t2);
+  // Mode manuel si cfg a des vagues avec des comptes différents
+  const hasMorning   = c.matchesMorning   != null;
+  const hasAfternoon = c.matchesAfternoon != null;
+  const auto = _calcAutoWaves(c.n||32, t1, t2, halls);
+  const isAuto = !hasMorning || (c.matchesMorning===auto.morning && c.matchesAfternoon===auto.afternoon);
+  setV('cfg_wave_mode', isAuto ? 'auto' : 'manual');
+  if(!isAuto){
+    setV('cfg_morning',   c.matchesMorning||3);
+    setV('cfg_afternoon', c.matchesAfternoon||4);
   }
   onCfgChange();
 }
@@ -541,41 +507,65 @@ window.saveCfgAndNext = async function(){
 };
 
 window.onCfgChange = function(){
-  const morning   = +(document.getElementById('cfg_morning')?.value||3);
-  const afternoon = +(document.getElementById('cfg_afternoon')?.value||4);
-  // Sauvegarder les valeurs actuelles AVANT de recréer le HTML
-  _saveWaveCache(morning, afternoon);
-  const lunchCk   = document.getElementById('cfg_lunch')?.checked;
-  const lunchRow  = document.getElementById('lunchRow');
+  // Afficher/masquer terrains salle 2
+  const halls   = +(document.getElementById('cfg_halls')?.value||1);
+  const t2row   = document.getElementById('cfg_t2_row');
+  if(t2row) t2row.style.display = halls===2 ? '' : 'none';
+
+  // Afficher/masquer inputs vagues manuels
+  const wMode   = document.getElementById('cfg_wave_mode')?.value || 'auto';
+  const mRow    = document.getElementById('cfg_morning_row');
+  const aRow    = document.getElementById('cfg_afternoon_row');
+  if(mRow) mRow.style.display = wMode==='manual' ? '' : 'none';
+  if(aRow) aRow.style.display = wMode==='manual' ? '' : 'none';
+
+  // Déjeuner
+  const lunchCk  = document.getElementById('cfg_lunch')?.checked;
+  const lunchRow = document.getElementById('lunchRow');
   if(lunchRow) lunchRow.style.display = lunchCk ? '' : 'none';
-  const mDiv=document.getElementById('morning_waves_config');
-  const aDiv=document.getElementById('afternoon_waves_config');
-  if(mDiv) mDiv.innerHTML=renderWaveInputs('morning',morning);
-  if(aDiv) aDiv.innerHTML=renderWaveInputs('afternoon',afternoon);
-  // Afficher/masquer les rangées salle 2
-  ['morning','afternoon'].forEach(sess=>{
-    const cnt=sess==='morning'?morning:afternoon;
-    const pfx=sess==='morning'?'m':'a';
-    for(let i=0;i<cnt;i++){
-      const sel=document.getElementById(`wv_halls_${pfx}${i}`);
-      if(!sel) continue;
-      const show=sel.value==='2';
-      ['t2row','teams2row'].forEach(sfx=>{
-        const row=document.getElementById(`wv_${sfx}_${pfx}${i}`);
-        if(row) row.style.display=show?'':'none';
-      });
-    }
-  });
-  const mt=+(document.getElementById('cfg_mt')?.value||15);
-  const tt=+(document.getElementById('cfg_tt')?.value||3);
-  const start=document.getElementById('cfg_start')?.value||'09:00';
-  const lunchStart=document.getElementById('cfg_lunchstart')?.value||'12:30';
-  const lunchDur=+(document.getElementById('cfg_lunchdur')?.value||60);
-  const n=+(document.getElementById('cfg_n')?.value||32);
-  const morningEnd=addMinutes(start,morning*(mt+tt)-tt);
-  const afterStart=lunchCk?addMinutes(lunchStart,lunchDur):morningEnd;
-  const afterEnd=addMinutes(afterStart,afternoon*(mt+tt)-tt);
-  const el=document.getElementById('cfgPreview');
+
+  // Calcul vagues
+  const n  = +(document.getElementById('cfg_n')?.value||32);
+  const t1 = +(document.getElementById('cfg_t1')?.value||8);
+  const t2 = +(document.getElementById('cfg_t2')?.value||8);
+  let morning, afternoon;
+  if(wMode==='manual'){
+    morning   = +(document.getElementById('cfg_morning')?.value||3);
+    afternoon = +(document.getElementById('cfg_afternoon')?.value||4);
+  } else {
+    const auto = _calcAutoWaves(n, t1, t2, halls);
+    morning   = auto.morning;
+    afternoon = auto.afternoon;
+    // Mettre à jour les inputs cachés pour cohérence
+    const em = document.getElementById('cfg_morning');
+    const ea = document.getElementById('cfg_afternoon');
+    if(em) em.value = morning;
+    if(ea) ea.value = afternoon;
+  }
+
+  // Info auto
+  const infoEl = document.getElementById('wave_auto_info');
+  if(infoEl){
+    const totalCourts = halls===2 ? t1+t2 : t1;
+    const matchesPerWave = Math.min(totalCourts, Math.floor(n/2));
+    const totalWaves = morning + afternoon;
+    infoEl.style.display = '';
+    infoEl.innerHTML = wMode==='auto'
+      ? `🤖 <strong>${totalWaves} vagues calculées automatiquement</strong> (${morning} matin + ${afternoon} après-midi)<br>
+         ${halls===2?`2 salles · ${t1} + ${t2} = <strong>${totalCourts} terrains</strong>`:`<strong>${t1} terrains</strong>`} · ${matchesPerWave} matchs simultanés par vague · ~${Math.round(n*matchesPerWave*2/n)} matchs/équipe`
+      : `✏️ Mode manuel : <strong>${morning} vagues matin</strong> + <strong>${afternoon} vagues après-midi</strong> = ${totalWaves} vagues`;
+  }
+
+  // Preview horaires
+  const mt        = +(document.getElementById('cfg_mt')?.value||15);
+  const tt        = +(document.getElementById('cfg_tt')?.value||3);
+  const start     = document.getElementById('cfg_start')?.value||'09:00';
+  const lunchStart= document.getElementById('cfg_lunchstart')?.value||'12:30';
+  const lunchDur  = +(document.getElementById('cfg_lunchdur')?.value||60);
+  const morningEnd  = addMinutes(start,  morning*(mt+tt)-tt);
+  const afterStart  = lunchCk ? addMinutes(lunchStart,lunchDur) : morningEnd;
+  const afterEnd    = addMinutes(afterStart, afternoon*(mt+tt)-tt);
+  const el = document.getElementById('cfgPreview');
   if(el){
     el.className='info info-g';
     el.innerHTML=`<strong>${n} équipes</strong> · <strong>${morning+afternoon} vagues</strong> (${morning} matin + ${afternoon} AM)<br>
@@ -640,11 +630,15 @@ function buildSchedule(){
     const isAM=wave.session==='afternoon';
     const sessStart=isAM?afternoonStart:morningStart;
     const matchTime=addMinutes(sessStart,wave.idx*(cfg.mt+cfg.tt));
+    // Config terrains unifiée
+    const halls = cfg.halls || wave.halls || 1;
+    const t1    = cfg.t1    || wave.t1    || 8;
+    const t2    = cfg.t2    || wave.t2    || 8;
     let grp1=[], grp2=[];
-    if(wave.halls===1){
+    if(halls===1){
       grp1=[...allIds]; grp2=[];
     } else {
-      const target1=wave.teams1>0?Math.min(wave.teams1,N):Math.ceil(N/2);
+      const target1=Math.ceil(N/2);
       const shuffled=shuffle(allIds);
       grp1=shuffled.slice(0,target1);
       grp2=shuffled.slice(target1);
@@ -655,24 +649,24 @@ function buildSchedule(){
       const s=[...grp1].sort((a,b)=>(playCount[a]-playCount[b])||((byeCount[a]||0)-(byeCount[b]||0))||(Math.random()-.5));
       bye1=s[0]; active1=grp1.filter(id=>id!==bye1); byeCount[bye1]=(byeCount[bye1]||0)+1;
     }
-    const matches1=makeRoundMatches(active1,wave.t1||8,oppCount);
+    const matches1=makeRoundMatches(active1,t1,oppCount);
     matches1.forEach(m=>{ [m.tA,m.tB].forEach(id=>{ playCount[id]=(playCount[id]||0)+1; if(!oppCount[id]) oppCount[id]={}; const o=m.tA===id?m.tB:m.tA; oppCount[id][o]=(oppCount[id][o]||0)+1; }); });
     let hall2=null;
-    if(wave.halls===2&&grp2.length>=2){
+    if(halls===2&&grp2.length>=2){
       const rem2=grp2.length%2;
       let bye2=null, active2=[...grp2];
       if(rem2===1){
         const s=[...grp2].sort((a,b)=>(playCount[a]-playCount[b])||((byeCount[a]||0)-(byeCount[b]||0))||(Math.random()-.5));
         bye2=s[0]; active2=grp2.filter(id=>id!==bye2); byeCount[bye2]=(byeCount[bye2]||0)+1;
       }
-      const matches2=makeRoundMatches(active2,wave.t2||8,oppCount);
+      const matches2=makeRoundMatches(active2,t2,oppCount);
       matches2.forEach(m=>{ [m.tA,m.tB].forEach(id=>{ playCount[id]=(playCount[id]||0)+1; if(!oppCount[id]) oppCount[id]={}; const o=m.tA===id?m.tB:m.tA; oppCount[id][o]=(oppCount[id][o]||0)+1; }); });
       hall2={ matches:matches2, bye:bye2, label:'Salle 2', teams:grp2 };
     }
     schedule.push({
       roundTime:matchTime, session:wave.session, posInSession:wave.idx,
       waveLabel:`${isAM?'🌤️':'☀️'} Vague ${wave.idx+1}`,
-      hall1:{ matches:matches1, bye:bye1, label:wave.halls===2?'Salle 1':'', teams:grp1 },
+      hall1:{ matches:matches1, bye:bye1, label:halls===2?'Salle 1':'', teams:grp1 },
       hall2, subs:[bye1,hall2?.bye].filter(Boolean)
     });
   }
@@ -1804,28 +1798,56 @@ input[type=checkbox]{ width:auto;margin-right:6px; }
     </div>
   </div>
 
-  <!-- ══ VAGUES MATIN ══ -->
+  <!-- ══ VAGUES (config unique) ══ -->
   <div class="card" style="margin-top:14px">
-    <div class="card-ttl">☀️ Vagues du matin</div>
+    <div class="card-ttl">🌊 Configuration des vagues</div>
     <div class="fg">
+
+      <!-- Terrains -->
       <div class="fr">
         <div>
-          <label>Nombre de vagues matin</label>
-          <select id="cfg_morning" onchange="onCfgChange()">
-            <option value="1">1 vague</option>
-            <option value="2">2 vagues</option>
-            <option value="3" selected>3 vagues</option>
-            <option value="4">4 vagues</option>
-            <option value="5">5 vagues</option>
-            <option value="6">6 vagues</option>
+          <label>Heure de début matin</label>
+          <input type="time" id="cfg_start" value="09:00" oninput="onCfgChange()">
+        </div>
+        <div>
+          <label>Salles</label>
+          <select id="cfg_halls" oninput="onCfgChange()">
+            <option value="1">1 salle</option>
+            <option value="2">2 salles</option>
           </select>
         </div>
         <div>
-          <label>Heure de début matin</label>
-          <input type="time" id="cfg_start" value="09:00" onchange="onCfgChange()">
+          <label>Terrains salle 1</label>
+          <input type="number" id="cfg_t1" value="8" min="1" max="30" oninput="onCfgChange()">
+        </div>
+        <div id="cfg_t2_row" style="display:none">
+          <label>Terrains salle 2</label>
+          <input type="number" id="cfg_t2" value="8" min="1" max="30" oninput="onCfgChange()">
         </div>
       </div>
-      <div id="morning_waves_config"></div>
+
+      <!-- Répartition vagues -->
+      <div class="fr" style="margin-top:10px">
+        <div>
+          <label>Répartition des vagues</label>
+          <select id="cfg_wave_mode" oninput="onCfgChange()">
+            <option value="auto" selected>🤖 Auto (calculé)</option>
+            <option value="manual">✏️ Manuel</option>
+          </select>
+        </div>
+        <div id="cfg_morning_row" style="display:none">
+          <label>Vagues matin</label>
+          <input type="number" id="cfg_morning" value="3" min="1" max="10" oninput="onCfgChange()">
+        </div>
+        <div id="cfg_afternoon_row" style="display:none">
+          <label>Vagues après-midi</label>
+          <input type="number" id="cfg_afternoon" value="4" min="1" max="10" oninput="onCfgChange()">
+        </div>
+      </div>
+
+      <!-- Preview auto vagues -->
+      <div id="wave_auto_info" class="info info-b" style="margin-top:10px;font-size:12px"></div>
+
     </div>
   </div>
 
@@ -1833,41 +1855,24 @@ input[type=checkbox]{ width:auto;margin-right:6px; }
   <div class="card" style="margin-top:14px">
     <div class="card-ttl" style="margin-bottom:10px">🍽️ Coupure déjeuner</div>
     <div style="display:flex;align-items:center;gap:10px;padding:10px 14px;background:var(--s2);border-radius:8px;border:1px solid var(--bdr);margin-bottom:10px">
-      <input type="checkbox" id="cfg_lunch" checked onchange="onCfgChange()" style="width:18px;height:18px;cursor:pointer">
+      <input type="checkbox" id="cfg_lunch" checked oninput="onCfgChange()" style="width:18px;height:18px;cursor:pointer">
       <label for="cfg_lunch" style="margin:0;text-transform:none;font-size:14px;cursor:pointer;letter-spacing:0;color:var(--ink)">Activer la coupure déjeuner</label>
     </div>
     <div class="fr" id="lunchRow">
       <div>
         <label>Début du déjeuner</label>
-        <input type="time" id="cfg_lunchstart" value="12:30" onchange="onCfgChange()">
+        <input type="time" id="cfg_lunchstart" value="12:30" oninput="onCfgChange()">
       </div>
       <div>
         <label>Durée déjeuner (min)</label>
-        <input type="number" id="cfg_lunchdur" value="60" min="15" max="180" step="15" onchange="onCfgChange()">
+        <input type="number" id="cfg_lunchdur" value="60" min="15" max="180" step="15" oninput="onCfgChange()">
       </div>
     </div>
   </div>
 
-  <!-- ══ VAGUES APRÈS-MIDI ══ -->
-  <div class="card" style="margin-top:14px">
-    <div class="card-ttl">🌤️ Vagues de l'après-midi</div>
-    <div class="fg">
-      <div class="fr">
-        <div>
-          <label>Nombre de vagues après-midi</label>
-          <select id="cfg_afternoon" onchange="onCfgChange()">
-            <option value="1">1 vague</option>
-            <option value="2">2 vagues</option>
-            <option value="3">3 vagues</option>
-            <option value="4" selected>4 vagues</option>
-            <option value="5">5 vagues</option>
-            <option value="6">6 vagues</option>
-          </select>
-        </div>
-      </div>
-      <div id="afternoon_waves_config"></div>
-    </div>
-  </div>
+  <!-- div vides gardés pour compatibilité buildSchedule -->
+  <div id="morning_waves_config" style="display:none"></div>
+  <div id="afternoon_waves_config" style="display:none"></div>
 
   <div class="card" style="margin-top:14px">
     <div class="card-ttl">⚖️ Algorithme d'appariement</div>
