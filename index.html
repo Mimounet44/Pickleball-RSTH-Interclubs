@@ -706,6 +706,100 @@ function renderGen(){
   el.innerHTML=html;
 }
 
+// ══════════════════════════════════════════════════════════
+// UTILITAIRE TEMPS
+// ══════════════════════════════════════════════════════════
+function addMinutes(timeStr, mins){
+  const [h,m] = (timeStr||'09:00').split(':').map(Number);
+  const total = h*60 + m + Math.round(mins);
+  const hh = Math.floor(total/60)%24;
+  const mm = total%60;
+  return String(hh).padStart(2,'0')+':'+String(mm).padStart(2,'0');
+}
+
+// ══════════════════════════════════════════════════════════
+// PAGE 2 — ÉQUIPES
+// ══════════════════════════════════════════════════════════
+function renderTeams(){
+  const cfg = getCfg();
+  const limit = cfg.n || ST.cfg.n || 32;
+  const list = document.getElementById('teamList');
+  const info = document.getElementById('teamCountInfo');
+  if(info) info.textContent = ST.teams.length + ' équipe' + (ST.teams.length>1?'s':'');
+  if(!list) return;
+  if(!ST.teams.length){
+    list.innerHTML='<div class="info info-y">Aucune équipe enregistrée.</div>'; return;
+  }
+  list.innerHTML = ST.teams.slice(0, limit).map((t,i)=>`
+    <div style="display:flex;align-items:center;gap:10px;padding:8px 10px;border-bottom:1px solid var(--bdr);font-size:13px">
+      <span style="font-family:'Oswald',sans-serif;font-size:15px;color:var(--dim);min-width:26px">${i+1}</span>
+      <div style="flex:1;min-width:0">
+        <div style="font-weight:700;color:var(--ink)">${t.name} ${t.club&&t.club!=='—'?`<span class="t-club-badge">${t.club}</span>`:''}</div>
+        <div style="font-size:11px;color:var(--muted)">${t.p1} · ${t.p2} · ${'⭐'.repeat(t.lv||1)}</div>
+      </div>
+      ${isAdmin()?`<button onclick="removeTeam('${t.id}')" style="background:none;border:1px solid var(--red);color:var(--red);border-radius:5px;padding:2px 8px;cursor:pointer;font-size:11px">✕</button>`:''}
+    </div>`).join('');
+}
+
+window.addTeam = async function(){
+  if(!isAdmin()){ alert('Réservé à l\'admin.'); return; }
+  const name  = document.getElementById('t_name').value.trim();
+  const club  = document.getElementById('t_club').value.trim() || '—';
+  const p1    = document.getElementById('t_p1').value.trim();
+  const p2    = document.getElementById('t_p2').value.trim();
+  const lv    = +document.getElementById('t_lv').value || 3;
+  if(!name||!p1||!p2){ alert('Nom, Joueur 1 et Joueur 2 sont obligatoires.'); return; }
+  const id = 't_' + Date.now() + '_' + Math.random().toString(36).slice(2,6);
+  ST.teams.push({ id, name, club, p1, p2, lv });
+  await saveTournament({ teams: ST.teams });
+  ['t_name','t_club','t_p1','t_p2'].forEach(fid=>{ const el=document.getElementById(fid); if(el) el.value=''; });
+  document.getElementById('t_lv').value='3';
+  renderTeams();
+  updateFwdBtn();
+};
+
+window.removeTeam = async function(id){
+  if(!isAdmin()) return;
+  if(!confirm('Supprimer cette équipe ?')) return;
+  ST.teams = ST.teams.filter(t=>t.id!==id);
+  await saveTournament({ teams: ST.teams });
+  renderTeams();
+  updateFwdBtn();
+};
+
+window.clearTeams = async function(){
+  if(!isAdmin()) return;
+  if(!confirm('Vider toutes les équipes ?')) return;
+  ST.teams = [];
+  await saveTournament({ teams: [] });
+  renderTeams();
+  updateFwdBtn();
+};
+
+window.autoFillTeams = async function(){
+  if(!isAdmin()) return;
+  const cfg = getCfg();
+  const n = cfg.n || 32;
+  const clubs = ['RSTH','Mauves','Ancenis','Nantes','Laval','Angers','Le Mans','Cholet'];
+  const names = ['Aigles','Pandas','Cobras','Lions','Faucons','Requins','Loups','Tigres','Ours','Lynx','Aigles B','Panthers'];
+  ST.teams = [];
+  for(let i=0;i<n;i++){
+    const club = clubs[i%clubs.length];
+    const nm   = names[i%names.length] + (i>=names.length?' '+(Math.floor(i/names.length)+1):'');
+    ST.teams.push({
+      id:  't_auto_'+i,
+      name: nm,
+      club,
+      p1:  'Joueur '+(i*2+1),
+      p2:  'Joueur '+(i*2+2),
+      lv:  (i%5)+1
+    });
+  }
+  await saveTournament({ teams: ST.teams });
+  renderTeams();
+  updateFwdBtn();
+};
+
 window.regenerate = async function(){
   if(!isAdmin()) return;
   ST.schedule = []; // force rebuild
