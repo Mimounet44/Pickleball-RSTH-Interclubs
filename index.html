@@ -443,15 +443,47 @@ function getCfg(){
   };
 }
 
+// Cache des valeurs saisies dans les inputs de vague — évite l'écrasement à chaque onCfgChange
+const _waveCache = {};
+
+function _saveWaveCache(morning, afternoon){
+  ['morning','afternoon'].forEach(sess=>{
+    const cnt  = sess==='morning' ? morning : afternoon;
+    const pfx  = sess==='morning' ? 'm' : 'a';
+    for(let i=0;i<cnt;i++){
+      const wId = `${pfx}${i}`;
+      const h  = document.getElementById(`wv_halls_${wId}`);
+      const t1 = document.getElementById(`wv_t1_${wId}`);
+      const t2 = document.getElementById(`wv_t2_${wId}`);
+      const e1 = document.getElementById(`wv_teams1_${wId}`);
+      const e2 = document.getElementById(`wv_teams2_${wId}`);
+      if(h||t1) _waveCache[wId] = {
+        halls:  h  ? +h.value  : (_waveCache[wId]?.halls  || 1),
+        t1:     t1 ? +t1.value : (_waveCache[wId]?.t1     || 8),
+        t2:     t2 ? +t2.value : (_waveCache[wId]?.t2     || 8),
+        teams1: e1 ? +e1.value : (_waveCache[wId]?.teams1 || 0),
+        teams2: e2 ? +e2.value : (_waveCache[wId]?.teams2 || 0),
+      };
+    }
+  });
+}
+
 function renderWaveInputs(session, count){
   const pfx   = session==='morning' ? 'm' : 'a';
   const label = session==='morning' ? '☀️ Vague matin' : '🌤️ Vague AM';
   let html='';
   for(let i=0;i<count;i++){
     const wId  = `${pfx}${i}`;
-    const prev = ST.cfg?.waves?.find(w=>w.session===session&&w.idx===i)||{};
-    const defH=prev.halls||1, defT1=prev.t1||8, defT2=prev.t2||8;
-    const defTeams1=prev.teams1||0, defTeams2=prev.teams2||0;
+    // Priorité : cache live > ST.cfg.waves > défauts
+    const cached = _waveCache[wId];
+    const saved  = Array.isArray(ST.cfg?.waves)
+      ? ST.cfg.waves.find(w=>w.session===session&&w.idx===i)
+      : null;
+    const defH      = cached?.halls  ?? saved?.halls  ?? 1;
+    const defT1     = cached?.t1     ?? saved?.t1     ?? 8;
+    const defT2     = cached?.t2     ?? saved?.t2     ?? 8;
+    const defTeams1 = cached?.teams1 ?? saved?.teams1 ?? 0;
+    const defTeams2 = cached?.teams2 ?? saved?.teams2 ?? 0;
     html+=`<div style="background:var(--s2);border:1px solid var(--bdr);border-radius:8px;padding:12px 14px;margin-bottom:8px">
       <div style="font-family:'Oswald',sans-serif;font-size:13px;letter-spacing:.6px;color:var(--blu);margin-bottom:10px">${label} ${i+1}</div>
       <div class="fr">
@@ -461,17 +493,17 @@ function renderWaveInputs(session, count){
             <option value="2" ${defH===2?'selected':''}>2 salles</option>
           </select></div>
         <div><label>Terrains salle 1</label>
-          <input type="number" id="wv_t1_${wId}" value="${defT1}" min="1" max="30" onchange="onCfgChange()"></div>
+          <input type="number" id="wv_t1_${wId}" value="${defT1}" min="1" max="30" oninput="onCfgChange()"></div>
         <div id="wv_t2row_${wId}" style="${defH===2?'':'display:none'}">
           <label>Terrains salle 2</label>
-          <input type="number" id="wv_t2_${wId}" value="${defT2}" min="1" max="30" onchange="onCfgChange()"></div>
+          <input type="number" id="wv_t2_${wId}" value="${defT2}" min="1" max="30" oninput="onCfgChange()"></div>
       </div>
       <div class="fr" style="margin-top:8px">
         <div><label>Éq. salle 1 <span style="font-weight:400;text-transform:none;font-size:10px">(0=auto)</span></label>
-          <input type="number" id="wv_teams1_${wId}" value="${defTeams1}" min="0" max="60" onchange="onCfgChange()"></div>
+          <input type="number" id="wv_teams1_${wId}" value="${defTeams1}" min="0" max="60" oninput="onCfgChange()"></div>
         <div id="wv_teams2row_${wId}" style="${defH===2?'':'display:none'}">
           <label>Éq. salle 2 <span style="font-weight:400;text-transform:none;font-size:10px">(0=auto)</span></label>
-          <input type="number" id="wv_teams2_${wId}" value="${defTeams2}" min="0" max="60" onchange="onCfgChange()"></div>
+          <input type="number" id="wv_teams2_${wId}" value="${defTeams2}" min="0" max="60" oninput="onCfgChange()"></div>
       </div></div>`;
   }
   return html;
@@ -490,6 +522,14 @@ function syncCfgForm(){
   setV('cfg_lunchstart',c.lunchStart||'12:30');
   setV('cfg_bal',c.bal||'level');
   setC('cfg_lunch',c.lunchBreak!==false);
+  // Pré-charger le cache depuis ST.cfg.waves pour que les inputs soient corrects
+  if(Array.isArray(c.waves)){
+    c.waves.forEach(w=>{
+      const pfx = w.session==='morning'?'m':'a';
+      const wId = `${pfx}${w.idx}`;
+      _waveCache[wId] = { halls:w.halls||1, t1:w.t1||8, t2:w.t2||8, teams1:w.teams1||0, teams2:w.teams2||0 };
+    });
+  }
   onCfgChange();
 }
 
@@ -503,6 +543,8 @@ window.saveCfgAndNext = async function(){
 window.onCfgChange = function(){
   const morning   = +(document.getElementById('cfg_morning')?.value||3);
   const afternoon = +(document.getElementById('cfg_afternoon')?.value||4);
+  // Sauvegarder les valeurs actuelles AVANT de recréer le HTML
+  _saveWaveCache(morning, afternoon);
   const lunchCk   = document.getElementById('cfg_lunch')?.checked;
   const lunchRow  = document.getElementById('lunchRow');
   if(lunchRow) lunchRow.style.display = lunchCk ? '' : 'none';
@@ -510,6 +552,7 @@ window.onCfgChange = function(){
   const aDiv=document.getElementById('afternoon_waves_config');
   if(mDiv) mDiv.innerHTML=renderWaveInputs('morning',morning);
   if(aDiv) aDiv.innerHTML=renderWaveInputs('afternoon',afternoon);
+  // Afficher/masquer les rangées salle 2
   ['morning','afternoon'].forEach(sess=>{
     const cnt=sess==='morning'?morning:afternoon;
     const pfx=sess==='morning'?'m':'a';
@@ -521,7 +564,6 @@ window.onCfgChange = function(){
         const row=document.getElementById(`wv_${sfx}_${pfx}${i}`);
         if(row) row.style.display=show?'':'none';
       });
-      sel.addEventListener('change',()=>onCfgChange(),{once:true});
     }
   });
   const mt=+(document.getElementById('cfg_mt')?.value||15);
