@@ -706,8 +706,6 @@ function renderGen(){
   el.innerHTML=html;
 }
 
-}
-
 window.regenerate = async function(){
   if(!isAdmin()) return;
   ST.schedule = []; // force rebuild
@@ -2429,12 +2427,6 @@ document.addEventListener('DOMContentLoaded',()=>{
   if(typeof onCfgChange==='function') onCfgChange();
 });
 
-window.addEventListener('resize',()=>{ if(window.innerWidth>767) closeMobileMenu(); });
-const _origApplyRoleUIMobile = window.applyRoleUI;
-window.applyRoleUI = function(){
-  _origApplyRoleUIMobile && _origApplyRoleUIMobile();
-  if(typeof syncDrawerButtons==='function') syncDrawerButtons();
-};
 </script>
 
 </body>
