@@ -176,6 +176,7 @@ window.enterLiveModeAndGo = function(target){
   if(specNav) specNav.classList.add('visible');
   const stepNav = document.getElementById('stepNav');
   if(stepNav) stepNav.style.display = 'none';
+  applyRoleUI();
   if(target === 'R'){ toggleRules(); }
   else if(target === 'T'){ goTo('T'); }
   else { goTo(target); }
@@ -696,67 +697,89 @@ function buildSchedule(){
   }
 
   const morningStart=cfg.start;
-  const afternoonStart=cfg.lunchBreak
-    ? addMinutes(cfg.lunchStart,cfg.lunchDuration||60)
-    : null; // calculé plus bas après le nb réel de sous-vagues du matin
 
-  const schedule=[];
-
-  // Construit les sous-vagues pour UN tour : si une salle a plus de matchs que de
-  // terrains disponibles, le tour est divisé en plusieurs sous-vagues consécutives
-  // (sous-vague 1 = T1..Tn, sous-vague 2 = T1..Tn pour les matchs restants, etc.),
-  // chaque salle gardant son propre nombre de sous-vagues selon ses terrains.
-  function buildRoundEntries(groups, tourIdx, isAM, sessStart, subWaveOffset){
-    // Pour chaque salle : calculer ses matchs du tour + son nb de sous-vagues
-    const hallData = groups.map((grp,gi)=>{
-      const r=pickRestAndActive(grp);
-      const allMatches=makeRoundMatches(r.active,r.maxMatches,oppCount);
-      allMatches.forEach(m=>{ [m.tA,m.tB].forEach(id=>{ playCount[id]=(playCount[id]||0)+1; if(!oppCount[id]) oppCount[id]={}; const o=m.tA===id?m.tB:m.tA; oppCount[id][o]=(oppCount[id][o]||0)+1; }); });
+  // ──────────────────────────────────────────────────────────
+  // Pour une session (matin ou après-midi) : génère, pour chaque salle,
+  // la liste COMPLÈTE des matchs de tous les tours de la session
+  // (avec leur tour d'origine + exempt éventuel par tour), puis
+  // découpe cette liste en créneaux consécutifs de `courts` matchs —
+  // sans aucune case vide. Si un tour produit moins de matchs que de
+  // terrains, les terrains libres sont immédiatement comblés par les
+  // matchs du tour suivant (même salle).
+  // ──────────────────────────────────────────────────────────
+  function buildSessionHalls(groups, toursCount){
+    return groups.map((grp,gi)=>{
       const courts=courtsArr[gi]||8;
-      const subWaves=[];
-      for(let i=0;i<allMatches.length;i+=courts) subWaves.push(allMatches.slice(i,i+courts));
-      if(subWaves.length===0) subWaves.push([]);
-      return { subWaves, byes:r.rest, label: numGroups>1?`Salle ${gi+1}`:'', teams:grp, courts };
+      const allMatches=[]; // {tA,tB,tourIdx}
+      const byesByTour=[]; // byesByTour[tourIdx] = [ids]
+      for(let t=0;t<toursCount;t++){
+        const r=pickRestAndActive(grp);
+        const matches=makeRoundMatches(r.active,r.maxMatches,oppCount);
+        matches.forEach(m=>{ [m.tA,m.tB].forEach(id=>{ playCount[id]=(playCount[id]||0)+1; if(!oppCount[id]) oppCount[id]={}; const o=m.tA===id?m.tB:m.tA; oppCount[id][o]=(oppCount[id][o]||0)+1; }); });
+        matches.forEach(m=>allMatches.push({...m, tourIdx:t}));
+        byesByTour.push(r.rest);
+      }
+      // Découper en créneaux pleins de `courts` matchs
+      const slots=[];
+      for(let i=0;i<allMatches.length;i+=courts) slots.push(allMatches.slice(i,i+courts));
+      if(slots.length===0) slots.push([]);
+      return { slots, byesByTour, label: numGroups>1?`Salle ${gi+1}`:'', teams:grp, courts };
     });
-    const maxSubWaves = Math.max(...hallData.map(h=>h.subWaves.length));
+  }
+
+  function assembleEntries(hallsData, isAM, sessStart){
+    const maxSlots = Math.max(...hallsData.map(h=>h.slots.length));
+    const seenByes = hallsData.map(()=>new Set()); // tours déjà annoncés (exempt affiché 1x)
     const entries=[];
-    for(let sw=0;sw<maxSubWaves;sw++){
-      const matchTime=addMinutes(sessStart, (subWaveOffset+sw)*(cfg.mt+cfg.tt));
-      const hallsOut = hallData.map(h=>({
-        matches: h.subWaves[sw]||[],
-        byes: sw===0 ? h.byes : [], // exempt affiché seulement à la 1ère sous-vague
-        label: h.label,
-        teams: h.teams,
-        subWaveIdx: sw, totalSubWaves: h.subWaves.length
-      }));
+    for(let s=0;s<maxSlots;s++){
+      const matchTime=addMinutes(sessStart, s*(cfg.mt+cfg.tt));
+      // Tours représentés dans ce créneau, par salle (pour le label)
+      const tourLabels=new Set();
+      const hallsOut = hallsData.map((h,hi)=>{
+        const matches=(h.slots[s]||[]).map(m=>({tA:m.tA,tB:m.tB}));
+        const toursInSlot=new Set((h.slots[s]||[]).map(m=>m.tourIdx));
+        toursInSlot.forEach(ti=>tourLabels.add(ti));
+        // Afficher l'exempt du tour la première fois que ce tour apparaît dans cette salle
+        let byes=[];
+        toursInSlot.forEach(ti=>{
+          if(!seenByes[hi].has(ti)){ byes.push(...(h.byesByTour[ti]||[])); seenByes[hi].add(ti); }
+        });
+        return { matches, byes, label:h.label, teams:h.teams };
+      });
       const restsAll=hallsOut.flatMap(h=>h.byes);
-      const subLabel = maxSubWaves>1 ? ` · sous-vague ${sw+1}/${maxSubWaves}` : '';
+      const sortedTours=[...tourLabels].sort((a,b)=>a-b);
+      let tourLabelStr;
+      if(sortedTours.length<=1){
+        tourLabelStr = `Tour ${(sortedTours[0]??0)+1}`;
+      } else if(sortedTours.length===sortedTours[sortedTours.length-1]-sortedTours[0]+1){
+        tourLabelStr = `Tours ${sortedTours[0]+1}→${sortedTours[sortedTours.length-1]+1}`;
+      } else {
+        tourLabelStr = `Tours ${sortedTours.map(t=>t+1).join('+')}`;
+      }
       entries.push({
-        roundTime:matchTime, session: isAM?'afternoon':'morning', posInSession:tourIdx,
-        waveLabel:`${isAM?'🌤️':'☀️'} Tour ${tourIdx+1}${subLabel}`,
+        roundTime:matchTime, session: isAM?'afternoon':'morning', posInSession:sortedTours[0]??0,
+        waveLabel:`${isAM?'🌤️':'☀️'} ${tourLabelStr}${maxSlots>1?` · créneau ${s+1}/${maxSlots}`:''}`,
         halls:hallsOut, hall1:hallsOut[0]||null, hall2:hallsOut[1]||null,
         subs:restsAll
       });
     }
-    return { entries, subWavesUsed:maxSubWaves };
+    return entries;
   }
+
+  const schedule=[];
 
   // Matin
-  let morningSubOffset=0;
-  for(let idx=0;idx<cfg.matchesMorning;idx++){
-    const {entries, subWavesUsed} = buildRoundEntries(groupsMorning, idx, false, morningStart, morningSubOffset);
-    schedule.push(...entries);
-    morningSubOffset += subWavesUsed;
-  }
+  const morningHallsData = buildSessionHalls(groupsMorning, cfg.matchesMorning);
+  const morningEntries = assembleEntries(morningHallsData, false, morningStart);
+  schedule.push(...morningEntries);
 
   // Après-midi — démarre après le déjeuner, ou directement après la fin réelle du matin
-  const realAfternoonStart = afternoonStart || addMinutes(morningStart, morningSubOffset*(cfg.mt+cfg.tt));
-  let afternoonSubOffset=0;
-  for(let idx=0;idx<cfg.matchesAfternoon;idx++){
-    const {entries, subWavesUsed} = buildRoundEntries(groupsAfternoon, idx, true, realAfternoonStart, afternoonSubOffset);
-    schedule.push(...entries);
-    afternoonSubOffset += subWavesUsed;
-  }
+  const afternoonStart = cfg.lunchBreak
+    ? addMinutes(cfg.lunchStart,cfg.lunchDuration||60)
+    : addMinutes(morningStart, morningEntries.length*(cfg.mt+cfg.tt));
+  const afternoonHallsData = buildSessionHalls(groupsAfternoon, cfg.matchesAfternoon);
+  const afternoonEntries = assembleEntries(afternoonHallsData, true, afternoonStart);
+  schedule.push(...afternoonEntries);
 
   ST.schedule=schedule; ST.results={}; ST.activeRound=0;
   return true;
@@ -2264,7 +2287,7 @@ input[type=checkbox]{ width:auto;margin-right:6px; }
   <div class="login-box">
     <div class="login-brand">🏓 Interclub</div>
     <div class="login-sub">Pickleball · Gestion de Tournoi</div>
-    <div style="text-align:center;font-size:10px;color:var(--dim);margin-bottom:14px;letter-spacing:1px">build v5.7 — retour connexion staff depuis spectateur</div>
+    <div style="text-align:center;font-size:10px;color:var(--dim);margin-bottom:14px;letter-spacing:1px">build v5.8 — terrains comblés sans temps mort</div>
     <div id="authMsg" style="text-align:center;font-size:13px;min-height:18px;margin-bottom:16px;color:var(--red)"></div>
 
     <!-- ══ ZONE SPECTATEURS ══ -->
