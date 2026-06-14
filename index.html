@@ -164,26 +164,21 @@ window.logout = async function(){
 
 // ── Mode Live spectateur ─────────────────────────────────
 window.enterLiveModeAndGo = function(target){
-  if(target !== 'R' && !ST.liveOpen){
+  if(target !== 'R' && target !== 'T' && !ST.liveOpen){
     const overlay = document.getElementById('liveClosedOverlay');
     if(overlay) overlay.style.display='flex';
     return;
   }
-  CURRENT_USER = null;
-  USER_ROLE    = 'spectator';
-  if(target !== 'R') ST.liveOpen = true;
-  document.getElementById('loginScreen').style.display='none';
-  document.getElementById('appScreen').style.display='block';
-  applyRoleUI();
-  subscribeToTournamentPublic();
-  subscribeToResultsPublic();
-  if(target === 'R'){
-    setTimeout(()=>{ if(typeof toggleRules==='function') toggleRules(); }, 100);
-  } else if(target === 5){
-    setTimeout(()=>{ goTo(5); }, 100);
-  } else {
-    setTimeout(()=>{ goTo(4); }, 100);
-  }
+  USER_ROLE = 'spectator';
+  document.getElementById('loginScreen').style.display = 'none';
+  document.getElementById('appScreen').style.display = '';
+  const specNav = document.getElementById('specNav');
+  if(specNav) specNav.classList.add('visible');
+  const stepNav = document.getElementById('stepNav');
+  if(stepNav) stepNav.style.display = 'none';
+  if(target === 'R'){ toggleRules(); }
+  else if(target === 'T'){ goTo('T'); }
+  else { goTo(target); }
 };
 
 function subscribeToTournamentPublic(){
@@ -328,6 +323,16 @@ function updateStepVisibility(){
 window.goTo = function(n){
   ST.prevPage=ST.page; ST.page=n;
   document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
+  if(n==='T'){
+    const pg = document.getElementById('pageT');
+    if(pg){ pg.classList.add('active'); renderTeamsSpecPage(); }
+    // Update spec nav
+    document.querySelectorAll('.spec-nav-btn').forEach(btn=>{
+      btn.classList.toggle('spec-nav-active', btn.textContent.includes('ÉQUIPES')||btn.textContent.includes('quipes'));
+    });
+    ST.page = 'T';
+    return;
+  }
   document.getElementById('page'+n).classList.add('active');
   document.getElementById('backBtn').style.display=(n>1&&isAdmin())?'':'none';
   updateFwdBtn();
@@ -383,7 +388,10 @@ function updateSteps(n){
     if(el) el.classList.toggle('done',i<n);
   }
 }
-window.spectatorGoLive = function(n){ goTo(n); };
+window.spectatorGoLive = function(n){
+  if(n==='T') goTo('T');
+  else goTo(n);
+};
 
 window.toggleRules = function(){
   ST.rulesOpen=!ST.rulesOpen;
@@ -407,23 +415,42 @@ window.toggleRules = function(){
 // PAGE 1 — CONFIG — vague unique, nb vagues auto
 // ══════════════════════════════════════════════════════════
 
-// Calcule le nb de vagues auto selon N équipes, terrains et matchs cibles par équipe
-function _calcAutoWaves(n, t1, t2, halls, targetMatches){
-  const totalCourts = halls===2 ? t1+t2 : t1;
-  const matchesPerWave = Math.min(totalCourts, Math.floor(n/2));
-  if(matchesPerWave===0) return {morning:1, afternoon:1, matchesPerWave:0, totalWaves:2};
-  const target = Math.max(1, targetMatches||5);
-  const totalWaves = Math.min(20, Math.max(2, Math.ceil(n * target / (matchesPerWave * 2))));
+// Calcule la répartition des groupes à partir du nb de salles et de terrains par salle.
+// Chaque salle accueille courtsPerHall*2 équipes. On répartit N équipes équitablement.
+function _calcGroups(n, numHalls, courtsPerHall){
+  const hall1courts = Math.max(1, +courtsPerHall);
+  const hall2courts = Math.max(1, +(arguments[3]||courtsPerHall)); // terrains salle 2 si différents
+  // capacité par salle = terrains × 2 équipes
+  const caps = [];
+  for(let g=0;g<numHalls;g++) caps.push(g===1&&arguments[3] ? hall2courts*2 : hall1courts*2);
+  const totalCap = caps.reduce((a,b)=>a+b,0);
+  // Répartir N équipes proportionnellement aux capacités
+  const sizes=[], courts=[];
+  let remaining=n;
+  caps.forEach((cap,gi)=>{
+    if(gi===numHalls-1){ sizes.push(remaining); }
+    else { sizes.push(Math.round(n*cap/totalCap)); remaining-=sizes[gi]; }
+    courts.push(Math.floor(sizes[gi]/2));
+  });
+  const totalCourts = courts.reduce((a,b)=>a+b,0);
+  const oddGroups = sizes.filter(s=>s%2===1).length;
+  return { numGroups:numHalls, sizes, courtsPerGroup:courts, totalCourts, oddGroups };
+}
+
+function _calcAutoWaves(n, numHalls, t1, t2, targetMatches){
+  const target = Math.max(1, Math.round(targetMatches||5));
+  const totalWaves = Math.min(20, Math.max(2, target));
   const morning   = Math.max(1, Math.round(totalWaves * 0.6));
   const afternoon = Math.max(1, totalWaves - morning);
-  return { morning, afternoon, matchesPerWave, totalWaves };
+  const g = _calcGroups(n, numHalls, t1, t2);
+  return { morning, afternoon, totalWaves, ...g };
 }
 
 function getCfg(){
   const n       = +document.getElementById('cfg_n').value || 32;
   const halls   = +(document.getElementById('cfg_halls')?.value||1);
   const t1      = +(document.getElementById('cfg_t1')?.value||8);
-  const t2      = +(document.getElementById('cfg_t2')?.value||8);
+  const t2      = +(document.getElementById('cfg_t2')?.value||t1);
   const wMode   = document.getElementById('cfg_wave_mode')?.value || 'auto';
   const targetMatchesPerTeam = +(document.getElementById('cfg_matches_per_team')?.value||5);
   let morning, afternoon;
@@ -431,18 +458,10 @@ function getCfg(){
     morning   = +(document.getElementById('cfg_morning')?.value||3);
     afternoon = +(document.getElementById('cfg_afternoon')?.value||4);
   } else {
-    const auto = _calcAutoWaves(n, t1, t2, halls, targetMatchesPerTeam);
+    const auto = _calcAutoWaves(n, halls, t1, t2, targetMatchesPerTeam);
     morning   = auto.morning;
     afternoon = auto.afternoon;
   }
-  // Construire le tableau waves — même config pour toutes les vagues
-  const waves = [];
-  ['morning','afternoon'].forEach(sess=>{
-    const count = sess==='morning' ? morning : afternoon;
-    for(let i=0;i<count;i++){
-      waves.push({ session:sess, idx:i, halls, t1, t2, teams1:0, teams2:0 });
-    }
-  });
   return {
     n,
     mt:             +(document.getElementById('cfg_mt')?.value||15),
@@ -455,9 +474,7 @@ function getCfg(){
     matchesMorning:   morning,
     matchesAfternoon: afternoon,
     halls, t1, t2,
-    targetMatchesPerTeam: targetMatchesPerTeam,
-    waves,
-    t: t1,
+    targetMatchesPerTeam,
   };
 }
 
@@ -473,19 +490,16 @@ function syncCfgForm(){
   setV('cfg_lunchstart', c.lunchStart||'12:30');
   setV('cfg_bal', c.bal||'level');
   setC('cfg_lunch', c.lunchBreak!==false);
-  // Terrains depuis la première vague ou depuis c.t1
-  const firstWave = Array.isArray(c.waves) ? c.waves[0] : null;
-  const halls  = c.halls  || firstWave?.halls  || 1;
-  const t1     = c.t1     || firstWave?.t1     || 8;
-  const t2     = c.t2     || firstWave?.t2     || 8;
+  const t1 = c.t1||8, t2 = c.t2||c.t1||8, halls = c.halls||1;
   setV('cfg_halls', halls);
   setV('cfg_t1', t1);
   setV('cfg_t2', t2);
+  const t2row = document.getElementById('cfg_t2_row');
+  if(t2row) t2row.style.display = halls>=2 ? '' : 'none';
   setV('cfg_matches_per_team', c.targetMatchesPerTeam||5);
-  // Mode manuel si cfg a des vagues avec des comptes différents
+  // Mode manuel si cfg a des comptes différents du calcul auto
   const hasMorning   = c.matchesMorning   != null;
-  const hasAfternoon = c.matchesAfternoon != null;
-  const auto = _calcAutoWaves(c.n||32, t1, t2, halls, c.targetMatchesPerTeam||5);
+  const auto = _calcAutoWaves(c.n||32, halls, t1, t2, c.targetMatchesPerTeam||5);
   const isAuto = !hasMorning || (c.matchesMorning===auto.morning && c.matchesAfternoon===auto.afternoon);
   setV('cfg_wave_mode', isAuto ? 'auto' : 'manual');
   if(!isAuto){
@@ -503,11 +517,6 @@ window.saveCfgAndNext = async function(){
 };
 
 window.onCfgChange = function(){
-  // Afficher/masquer terrains salle 2
-  const halls   = +(document.getElementById('cfg_halls')?.value||1);
-  const t2row   = document.getElementById('cfg_t2_row');
-  if(t2row) t2row.style.display = halls===2 ? '' : 'none';
-
   // Afficher/masquer inputs vagues manuels
   const wMode   = document.getElementById('cfg_wave_mode')?.value || 'auto';
   const mRow    = document.getElementById('cfg_morning_row');
@@ -520,17 +529,22 @@ window.onCfgChange = function(){
   const lunchRow = document.getElementById('lunchRow');
   if(lunchRow) lunchRow.style.display = lunchCk ? '' : 'none';
 
-  // Calcul vagues
+  // Afficher/masquer terrains salle 2
+  const halls = +(document.getElementById('cfg_halls')?.value||1);
+  const t2rowEl = document.getElementById('cfg_t2_row');
+  if(t2rowEl) t2rowEl.style.display = halls>=2 ? '' : 'none';
+
+  // Calcul vagues / groupes
   const n  = +(document.getElementById('cfg_n')?.value||32);
   const t1 = +(document.getElementById('cfg_t1')?.value||8);
-  const t2 = +(document.getElementById('cfg_t2')?.value||8);
+  const t2 = +(document.getElementById('cfg_t2')?.value||t1);
   const targetMPT = +(document.getElementById('cfg_matches_per_team')?.value||5);
   let morning, afternoon;
   if(wMode==='manual'){
     morning   = +(document.getElementById('cfg_morning')?.value||3);
     afternoon = +(document.getElementById('cfg_afternoon')?.value||4);
   } else {
-    const auto = _calcAutoWaves(n, t1, t2, halls, targetMPT);
+    const auto = _calcAutoWaves(n, halls, t1, t2, targetMPT);
     morning   = auto.morning;
     afternoon = auto.afternoon;
     const em = document.getElementById('cfg_morning');
@@ -543,16 +557,32 @@ window.onCfgChange = function(){
   const mptRow = document.getElementById('cfg_mpt_row');
   if(mptRow) mptRow.style.display = wMode==='auto' ? '' : 'none';
 
-  // Info auto
+  // Info groupes / exempts
   const infoEl = document.getElementById('wave_auto_info');
   if(infoEl){
-    const totalCourts = halls===2 ? t1+t2 : t1;
-    const matchesPerWave = Math.min(totalCourts, Math.floor(n/2));
+    const g = _calcGroups(n, halls, t1, t2);
     const totalWaves = morning + afternoon;
     infoEl.style.display = '';
-    infoEl.innerHTML = wMode==='auto'
-      ? `🤖 <strong>${totalWaves} vagues calculées</strong> (${morning} matin + ${afternoon} après-midi) · ${halls===2?`${t1}+${t2}=<strong>${totalCourts} terrains</strong>`:`<strong>${t1} terrains</strong>`} · <strong>${matchesPerWave} matchs/vague</strong> · cible <strong>${targetMPT} matchs/équipe</strong>`
-      : `✏️ Mode manuel : <strong>${morning} vagues matin</strong> + <strong>${afternoon} vagues après-midi</strong> = ${morning+afternoon} vagues`;
+    infoEl.className = g.oddGroups>0 ? 'info info-y' : 'info info-b';
+    const sizesStr = g.sizes.join('+');
+    // Détection sous-vagues : matchs par salle vs terrains par salle
+    const courtsArr=[t1,t2,t1,t1].slice(0,halls);
+    const subWavesPerHall = g.sizes.map((sz,gi)=>Math.ceil(Math.floor(sz/2)/(courtsArr[gi]||1)));
+    const maxSubWaves = Math.max(...subWavesPerHall);
+    const totalSlots = totalWaves * maxSubWaves;
+    infoEl.innerHTML = (wMode==='auto'
+      ? `🤖 <strong>${totalWaves} tours</strong> (${morning} matin + ${afternoon} après-midi) — cible <strong>${targetMPT} matchs/équipe</strong>`
+      : `✏️ Mode manuel : <strong>${morning} tours matin</strong> + <strong>${afternoon} tours après-midi</strong> = ${totalWaves} tours`)
+      + `<br>🏟️ <strong>${g.numGroups} salle${g.numGroups>1?'s':''}</strong> de ${sizesStr} équipes · ${courtsArr.join('+')} terrains (${g.courtsPerGroup.join('+')} matchs simultanés)`
+      + (g.oddGroups>0
+          ? `<br>⚠️ <strong>${g.oddGroups} équipe${g.oddGroups>1?'s':''} exempte${g.oddGroups>1?'s':''} par tour</strong> (salle${g.oddGroups>1?'s':''} à effectif impair) — l'exemption tourne équitablement et compte 2 pts / 0-0.`
+          : `<br>✅ Aucune équipe exempte — tout le monde joue à chaque tour.`)
+      + (maxSubWaves>1
+          ? `<br>🔀 Chaque tour est divisé en <strong>${maxSubWaves} sous-vagues</strong> (plus de matchs que de terrains dans au moins une salle) → environ <strong>${totalSlots} créneaux horaires</strong> au total.`
+          : '')
+      + (lunchCk
+          ? `<br>🔁 Les groupes sont reformés à la pause déjeuner (matin ≠ après-midi).`
+          : `<br>🔒 Les équipes restent dans la même salle toute la journée (pas de coupure).`);
   }
 
   // Preview horaires
@@ -567,11 +597,12 @@ window.onCfgChange = function(){
   const el = document.getElementById('cfgPreview');
   if(el){
     el.className='info info-g';
-    el.innerHTML=`<strong>${n} équipes</strong> · <strong>${morning+afternoon} vagues</strong> (${morning} matin + ${afternoon} AM)<br>
+    el.innerHTML=`<strong>${n} équipes</strong> · <strong>${morning+afternoon} tours</strong> (${morning} matin + ${afternoon} AM)<br>
     ☀️ ${start} → ${morningEnd}${lunchCk?` · 🍽️ ${lunchStart} (${lunchDur} min)`:''}<br>
     🌤️ ${afterStart} → ${afterEnd} · ⏱ match ${mt} min · transition ${tt} min`;
   }
 };
+
 
 // ══════════════════════════════════════════════════════════
 // GÉNÉRATION — vagues indépendantes, salles peuvent changer
@@ -620,55 +651,113 @@ function buildSchedule(){
   const allIds=ST.teams.slice(0,N).map(t=>t.id);
   const oppCount={}, playCount={}, byeCount={};
   allIds.forEach(id=>{ oppCount[id]={}; playCount[id]=0; byeCount[id]=0; });
+
+  const halls = cfg.halls||1;
+  const courtsArr = [cfg.t1||8, cfg.t2||cfg.t1||8, cfg.t1||8, cfg.t1||8].slice(0,halls);
+  const numGroups = _calcGroups(N, halls, cfg.t1||8, cfg.t2||cfg.t1||8).numGroups;
+
+  // Répartit les équipes en `numGroups` groupes de tailles équilibrées (mélange aléatoire)
+  function makeGroups(ids){
+    const shuffled=shuffle(ids);
+    const base=Math.floor(N/numGroups), extra=N%numGroups;
+    const groups=[]; let idx=0;
+    for(let g=0;g<numGroups;g++){
+      const size=base+(g<extra?1:0);
+      groups.push(shuffled.slice(idx,idx+size));
+      idx+=size;
+    }
+    return groups;
+  }
+
+  // Groupes fixes pour la session — un seul mélange le matin, un seul l'après-midi.
+  // Pas de changement de salle en cours de session ; nouveau mélange uniquement
+  // à la pause déjeuner (si activée).
+  const groupsMorning   = makeGroups(allIds);
+  const groupsAfternoon = cfg.lunchBreak ? makeGroups(allIds) : groupsMorning;
+
+  // Sélectionne au plus 1 équipe au repos par groupe (si effectif impair),
+  // en priorisant celles qui ont le moins reposé / le plus joué.
+  function pickRestAndActive(grp){
+    const maxMatches=Math.floor(grp.length/2);
+    const numRest=grp.length - maxMatches*2; // 0 ou 1
+    let rest=[], active=[...grp];
+    if(numRest>0){
+      const sorted=[...grp].sort((a,b)=>
+        ((byeCount[a]||0)-(byeCount[b]||0)) ||
+        (playCount[b]-playCount[a]) ||
+        (Math.random()-.5)
+      );
+      rest=sorted.slice(0,numRest);
+      const restSet=new Set(rest);
+      active=grp.filter(id=>!restSet.has(id));
+      rest.forEach(id=>{ byeCount[id]=(byeCount[id]||0)+1; });
+    }
+    return {active, rest, maxMatches};
+  }
+
   const morningStart=cfg.start;
   const afternoonStart=cfg.lunchBreak
     ? addMinutes(cfg.lunchStart,cfg.lunchDuration||60)
-    : addMinutes(morningStart,cfg.matchesMorning*(cfg.mt+cfg.tt));
+    : null; // calculé plus bas après le nb réel de sous-vagues du matin
+
   const schedule=[];
-  for(const wave of cfg.waves){
-    const isAM=wave.session==='afternoon';
-    const sessStart=isAM?afternoonStart:morningStart;
-    const matchTime=addMinutes(sessStart,wave.idx*(cfg.mt+cfg.tt));
-    // Config terrains unifiée
-    const halls = cfg.halls || wave.halls || 1;
-    const t1    = cfg.t1    || wave.t1    || 8;
-    const t2    = cfg.t2    || wave.t2    || 8;
-    let grp1=[], grp2=[];
-    if(halls===1){
-      grp1=[...allIds]; grp2=[];
-    } else {
-      const target1=Math.ceil(N/2);
-      const shuffled=shuffle(allIds);
-      grp1=shuffled.slice(0,target1);
-      grp2=shuffled.slice(target1);
-    }
-    const rem1=grp1.length%2;
-    let bye1=null, active1=[...grp1];
-    if(rem1===1){
-      const s=[...grp1].sort((a,b)=>(playCount[a]-playCount[b])||((byeCount[a]||0)-(byeCount[b]||0))||(Math.random()-.5));
-      bye1=s[0]; active1=grp1.filter(id=>id!==bye1); byeCount[bye1]=(byeCount[bye1]||0)+1;
-    }
-    const matches1=makeRoundMatches(active1,t1,oppCount);
-    matches1.forEach(m=>{ [m.tA,m.tB].forEach(id=>{ playCount[id]=(playCount[id]||0)+1; if(!oppCount[id]) oppCount[id]={}; const o=m.tA===id?m.tB:m.tA; oppCount[id][o]=(oppCount[id][o]||0)+1; }); });
-    let hall2=null;
-    if(halls===2&&grp2.length>=2){
-      const rem2=grp2.length%2;
-      let bye2=null, active2=[...grp2];
-      if(rem2===1){
-        const s=[...grp2].sort((a,b)=>(playCount[a]-playCount[b])||((byeCount[a]||0)-(byeCount[b]||0))||(Math.random()-.5));
-        bye2=s[0]; active2=grp2.filter(id=>id!==bye2); byeCount[bye2]=(byeCount[bye2]||0)+1;
-      }
-      const matches2=makeRoundMatches(active2,t2,oppCount);
-      matches2.forEach(m=>{ [m.tA,m.tB].forEach(id=>{ playCount[id]=(playCount[id]||0)+1; if(!oppCount[id]) oppCount[id]={}; const o=m.tA===id?m.tB:m.tA; oppCount[id][o]=(oppCount[id][o]||0)+1; }); });
-      hall2={ matches:matches2, bye:bye2, label:'Salle 2', teams:grp2 };
-    }
-    schedule.push({
-      roundTime:matchTime, session:wave.session, posInSession:wave.idx,
-      waveLabel:`${isAM?'🌤️':'☀️'} Vague ${wave.idx+1}`,
-      hall1:{ matches:matches1, bye:bye1, label:halls===2?'Salle 1':'', teams:grp1 },
-      hall2, subs:[bye1,hall2?.bye].filter(Boolean)
+
+  // Construit les sous-vagues pour UN tour : si une salle a plus de matchs que de
+  // terrains disponibles, le tour est divisé en plusieurs sous-vagues consécutives
+  // (sous-vague 1 = T1..Tn, sous-vague 2 = T1..Tn pour les matchs restants, etc.),
+  // chaque salle gardant son propre nombre de sous-vagues selon ses terrains.
+  function buildRoundEntries(groups, tourIdx, isAM, sessStart, subWaveOffset){
+    // Pour chaque salle : calculer ses matchs du tour + son nb de sous-vagues
+    const hallData = groups.map((grp,gi)=>{
+      const r=pickRestAndActive(grp);
+      const allMatches=makeRoundMatches(r.active,r.maxMatches,oppCount);
+      allMatches.forEach(m=>{ [m.tA,m.tB].forEach(id=>{ playCount[id]=(playCount[id]||0)+1; if(!oppCount[id]) oppCount[id]={}; const o=m.tA===id?m.tB:m.tA; oppCount[id][o]=(oppCount[id][o]||0)+1; }); });
+      const courts=courtsArr[gi]||8;
+      const subWaves=[];
+      for(let i=0;i<allMatches.length;i+=courts) subWaves.push(allMatches.slice(i,i+courts));
+      if(subWaves.length===0) subWaves.push([]);
+      return { subWaves, byes:r.rest, label: numGroups>1?`Salle ${gi+1}`:'', teams:grp, courts };
     });
+    const maxSubWaves = Math.max(...hallData.map(h=>h.subWaves.length));
+    const entries=[];
+    for(let sw=0;sw<maxSubWaves;sw++){
+      const matchTime=addMinutes(sessStart, (subWaveOffset+sw)*(cfg.mt+cfg.tt));
+      const hallsOut = hallData.map(h=>({
+        matches: h.subWaves[sw]||[],
+        byes: sw===0 ? h.byes : [], // exempt affiché seulement à la 1ère sous-vague
+        label: h.label,
+        teams: h.teams,
+        subWaveIdx: sw, totalSubWaves: h.subWaves.length
+      }));
+      const restsAll=hallsOut.flatMap(h=>h.byes);
+      const subLabel = maxSubWaves>1 ? ` · sous-vague ${sw+1}/${maxSubWaves}` : '';
+      entries.push({
+        roundTime:matchTime, session: isAM?'afternoon':'morning', posInSession:tourIdx,
+        waveLabel:`${isAM?'🌤️':'☀️'} Tour ${tourIdx+1}${subLabel}`,
+        halls:hallsOut, hall1:hallsOut[0]||null, hall2:hallsOut[1]||null,
+        subs:restsAll
+      });
+    }
+    return { entries, subWavesUsed:maxSubWaves };
   }
+
+  // Matin
+  let morningSubOffset=0;
+  for(let idx=0;idx<cfg.matchesMorning;idx++){
+    const {entries, subWavesUsed} = buildRoundEntries(groupsMorning, idx, false, morningStart, morningSubOffset);
+    schedule.push(...entries);
+    morningSubOffset += subWavesUsed;
+  }
+
+  // Après-midi — démarre après le déjeuner, ou directement après la fin réelle du matin
+  const realAfternoonStart = afternoonStart || addMinutes(morningStart, morningSubOffset*(cfg.mt+cfg.tt));
+  let afternoonSubOffset=0;
+  for(let idx=0;idx<cfg.matchesAfternoon;idx++){
+    const {entries, subWavesUsed} = buildRoundEntries(groupsAfternoon, idx, true, realAfternoonStart, afternoonSubOffset);
+    schedule.push(...entries);
+    afternoonSubOffset += subWavesUsed;
+  }
+
   ST.schedule=schedule; ST.results={}; ST.activeRound=0;
   return true;
 }
@@ -686,30 +775,34 @@ function renderGen(){
   const playCount={};
   ST.teams.slice(0,cfg.n).forEach(t=>playCount[t.id]=0);
   ST.schedule.forEach(rd=>{
-    [rd.hall1,rd.hall2].filter(Boolean).forEach(h=>{
+    rd.halls.forEach(h=>{
       h.matches.forEach(m=>{ playCount[m.tA]=(playCount[m.tA]||0)+1; playCount[m.tB]=(playCount[m.tB]||0)+1; });
     });
   });
   const pVals=Object.values(playCount).filter(v=>v>0);
   const maxPlay=pVals.length?Math.max(...pVals):0, minPlay=pVals.length?Math.min(...pVals):0;
-  const totalMatchCount=ST.schedule.reduce((s,rd)=>s+rd.hall1.matches.length+(rd.hall2?rd.hall2.matches.length:0),0);
+  const totalMatchCount=ST.schedule.reduce((s,rd)=>s+rd.halls.reduce((s2,h)=>s2+h.matches.length,0),0);
   const lastRd=ST.schedule[ST.schedule.length-1];
   const endTime=addMinutes(lastRd.roundTime,cfg.mt);
   const gib=document.getElementById('genInfoBox');
   if(gib){
     const byeCount={}; ST.teams.slice(0,cfg.n).forEach(t=>byeCount[t.id]=0);
     ST.schedule.forEach(rd=>{
-      if(rd.hall1.bye) byeCount[rd.hall1.bye]=(byeCount[rd.hall1.bye]||0)+1;
-      if(rd.hall2?.bye) byeCount[rd.hall2.bye]=(byeCount[rd.hall2.bye]||0)+1;
+      rd.halls.forEach(h=>(h.byes||[]).forEach(id=>{ byeCount[id]=(byeCount[id]||0)+1; }));
     });
     const totalByes=Object.values(byeCount).reduce((s,v)=>s+v,0);
+    const numTours = cfg.matchesMorning+cfg.matchesAfternoon;
+    const numEntries = ST.schedule.length;
+    const toursLabel = numEntries===numTours
+      ? `<strong>${numTours} tours</strong>`
+      : `<strong>${numTours} tours</strong> sur <strong>${numEntries} créneaux</strong> (sous-vagues car salle(s) avec plus de matchs que de terrains)`;
     gib.className='info info-g';
-    gib.innerHTML=`✅ <strong>${ST.teams.slice(0,cfg.n).length} équipes</strong> · <strong>${cfg.matchesMorning+cfg.matchesAfternoon} vagues</strong> · <strong>${totalMatchCount} matchs</strong><br>
+    gib.innerHTML=`✅ <strong>${ST.teams.slice(0,cfg.n).length} équipes</strong> · ${toursLabel} · <strong>${totalMatchCount} matchs</strong><br>
     Matchs/équipe : <strong>${minPlay}–${maxPlay}</strong>${totalByes>0?` · ${totalByes} exemption(s)`:' · Toutes jouent'}<br>
     ${cfg.start} → ${endTime}`;
   }
   function renderWaveBlock(rd,ri){
-    const halls=[rd.hall1,rd.hall2].filter(Boolean);
+    const halls=rd.halls;
     return `<div class="round-block">
       <div class="round-hdr">
         <span class="round-hdr-ttl">${rd.waveLabel||'🎯 Vague '+(ri+1)}</span>
@@ -781,9 +874,9 @@ function renderFichesPanel(){
     let nextMatch = null;
     for(let r=ST.activeRound; r<ST.schedule.length; r++){
       const rd = ST.schedule[r];
-      const halls = [rd.hall1, rd.hall2].filter(Boolean);
+      const halls = rd.halls;
       for(const h of halls){
-        if(h.bye===t.id){ nextMatch={time:rd.roundTime, label:'🟡 Exempt', court:'—', opp:null}; break; }
+        if((h.byes||[]).includes(t.id)){ nextMatch={time:rd.roundTime, label:'🟡 Exempt', court:'—', opp:null}; break; }
         for(let mi=0;mi<h.matches.length;mi++){
           const m=h.matches[mi];
           if(m.tA===t.id||m.tB===t.id){
@@ -804,6 +897,73 @@ function renderFichesPanel(){
       <div style="font-size:11px;color:var(--muted)">${t.p1} · ${t.p2}</div>
       ${nextHtml}
       <div style="font-size:10px;color:var(--dim);margin-top:4px">🖨 Cliquer pour imprimer la fiche</div>
+    </div>`;
+  }).join('');
+}
+
+// ══════════════════════════════════════════════════════════
+// PAGE ÉQUIPES SPECTATEUR
+// ══════════════════════════════════════════════════════════
+function renderTeamsSpecPage(){
+  const el = document.getElementById('teamsSpecGrid'); if(!el) return;
+  if(!ST.teams.length){ el.innerHTML='<div class="info info-y">Aucune équipe inscrite.</div>'; return; }
+  const limit = ST.cfg?.n || ST.teams.length;
+  const teams = ST.teams.slice(0, limit);
+  _ensureRoundTimes();
+  el.innerHTML = teams.map(t=>{
+    // Programme complet de l'équipe
+    const rows = [];
+    ST.schedule.forEach((rd,r)=>{
+      const halls=rd.halls;
+      halls.forEach((h,hi)=>{
+        if((h.byes||[]).includes(t.id)){ rows.push({type:'bye',time:rd.roundTime,wave:rd.waveLabel||('V'+(r+1)),session:rd.session}); return; }
+        h.matches.forEach((m,mi)=>{
+          if(m.tA===t.id||m.tB===t.id){
+            const opp=m.tA===t.id?m.tB:m.tA;
+            const gmi=getGlobalMatchIdxFromHallIdx(r,hi,mi);
+            const res=getRes(r,gmi);
+            const isA=m.tA===t.id;
+            const myS=isA?res.ga:res.gb, oppS=isA?res.gb:res.ga;
+            const done=myS!==''&&oppS!=='';
+            let result='',color='var(--muted)';
+            if(done){ const ms=+myS,os=+oppS;
+              if(ms>os){result='✅';color='var(--grn)';}
+              else if(ms<os){result='❌';color='var(--red)';}
+              else{result='🟡';color='var(--ylw)';}
+            }
+            rows.push({type:'match',time:rd.roundTime,wave:rd.waveLabel||('V'+(r+1)),session:rd.session,
+              court:`T${mi+1}${h.label?' '+h.label:''}`,opp,myS,oppS,done,result,color});
+          }
+        });
+      });
+    });
+    const rowsHtml = rows.map(row=>{
+      if(row.type==='bye') return `<tr style="background:var(--ylw-bg)"><td style="color:var(--muted);font-size:10px">${row.wave}</td><td style="font-weight:700">${row.time}</td><td colspan="3" style="color:var(--ylw);font-size:11px">🟡 Exempt</td></tr>`;
+      const oppObj=tObj(row.opp);
+      return `<tr>
+        <td style="color:var(--muted);font-size:10px">${row.wave}</td>
+        <td style="font-weight:700;color:var(--blu)">${row.time}</td>
+        <td style="color:var(--dim);font-size:11px">${row.court}</td>
+        <td style="font-size:11px"><strong>${oppObj?oppObj.name:row.opp}</strong>${oppObj&&oppObj.club&&oppObj.club!=='—'?`<br><span style='font-size:9px;color:var(--muted)'>${oppObj.club}</span>`:''}</td>
+        <td style="text-align:center;color:${row.color};font-size:12px">${row.done?`<strong>${row.myS}–${row.oppS}</strong> ${row.result}`:'<span style="color:var(--dim)">–</span>'}</td>
+      </tr>`;
+    }).join('');
+    return `<div style="background:var(--s1);border:1px solid var(--bdr);border-radius:10px;padding:12px;cursor:pointer" onclick="printTeamScheduleSingle('${t.id}')">
+      <div style="font-family:'Oswald',sans-serif;font-size:16px;font-weight:700;color:var(--ink);margin-bottom:2px">${t.name}
+        ${t.club&&t.club!=='—'?`<span class="t-club-badge">${t.club}</span>`:''}
+      </div>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:8px">👤 ${t.p1} &amp; ${t.p2}</div>
+      ${rows.length?`<table style="width:100%;border-collapse:collapse;font-size:11px">
+        <thead><tr style="border-bottom:1px solid var(--bdr)">
+          <th style="text-align:left;padding:2px 4px;color:var(--dim);font-size:9px;font-weight:700">Vague</th>
+          <th style="text-align:left;padding:2px 4px;color:var(--dim);font-size:9px;font-weight:700">Heure</th>
+          <th style="text-align:left;padding:2px 4px;color:var(--dim);font-size:9px;font-weight:700">Terrain</th>
+          <th style="text-align:left;padding:2px 4px;color:var(--dim);font-size:9px;font-weight:700">Adversaire</th>
+          <th style="text-align:center;padding:2px 4px;color:var(--dim);font-size:9px;font-weight:700">Score</th>
+        </tr></thead>
+        <tbody>${rowsHtml}</tbody>
+      </table>`:'<div style="color:var(--muted);font-size:11px">Planning non généré</div>'}
+      <div style="font-size:10px;color:var(--dim);margin-top:8px;text-align:right">🖨 Cliquer pour imprimer</div>
     </div>`;
   }).join('');
 }
@@ -839,9 +999,47 @@ function renderTeams(){
         <div style="font-weight:700;color:var(--ink)">${t.name} ${t.club&&t.club!=='—'?`<span class="t-club-badge">${t.club}</span>`:''}</div>
         <div style="font-size:11px;color:var(--muted)">${t.p1} · ${t.p2} · ${'⭐'.repeat(t.lv||1)}</div>
       </div>
-      ${isAdmin()?`<button onclick="removeTeam('${t.id}')" style="background:none;border:1px solid var(--red);color:var(--red);border-radius:5px;padding:2px 8px;cursor:pointer;font-size:11px">✕</button>`:''}
+      ${isAdmin()?`<button onclick="openEditTeam('${t.id}')" style="background:none;border:1px solid var(--blu);color:var(--blu);border-radius:5px;padding:2px 8px;cursor:pointer;font-size:11px;margin-right:4px">✏️</button><button onclick="removeTeam('${t.id}')" style="background:none;border:1px solid var(--red);color:var(--red);border-radius:5px;padding:2px 8px;cursor:pointer;font-size:11px">✕</button>`:''}
     </div>`).join('');
 }
+
+// ══════════════════════════════════════════════════════════
+// ÉDITION ÉQUIPE / JOUEURS (modale)
+// ══════════════════════════════════════════════════════════
+window.openEditTeam = function(id){
+  if(!isAdmin()) return;
+  const t = ST.teams.find(x=>x.id===id); if(!t) return;
+  document.getElementById('edit_team_id').value = t.id;
+  document.getElementById('edit_t_name').value = t.name;
+  document.getElementById('edit_t_club').value = t.club==='—'?'':t.club;
+  document.getElementById('edit_t_p1').value = t.p1;
+  document.getElementById('edit_t_p2').value = t.p2;
+  document.getElementById('edit_t_lv').value = t.lv||3;
+  document.getElementById('editTeamOverlay').style.display='flex';
+};
+
+window.closeEditTeam = function(){
+  document.getElementById('editTeamOverlay').style.display='none';
+};
+
+window.saveEditTeam = async function(){
+  if(!isAdmin()) return;
+  const id   = document.getElementById('edit_team_id').value;
+  const t = ST.teams.find(x=>x.id===id); if(!t) return;
+  const name = document.getElementById('edit_t_name').value.trim();
+  const club = document.getElementById('edit_t_club').value.trim() || '—';
+  const p1   = document.getElementById('edit_t_p1').value.trim();
+  const p2   = document.getElementById('edit_t_p2').value.trim();
+  const lv   = +document.getElementById('edit_t_lv').value || 3;
+  if(!name||!p1||!p2){ alert('Nom, Joueur 1 et Joueur 2 sont obligatoires.'); return; }
+  t.name=name; t.club=club; t.p1=p1; t.p2=p2; t.lv=lv;
+  await saveTournament({ teams: ST.teams });
+  closeEditTeam();
+  renderTeams();
+  if(ST.schedule.length){ renderMatches(); renderMiniStandings(); renderRoundTabs(); }
+  if(_spectatorTab==='fiches') renderFichesPanel();
+  if(ST.page==='T') renderTeamsSpecPage();
+};
 
 window.addTeam = async function(){
   if(!isAdmin()){ alert('Réservé à l\'admin.'); return; }
@@ -1034,13 +1232,14 @@ function renderRoundTabs(){
   el.innerHTML=ST.schedule.map((rd,r)=>{
     const d=isRoundDone(r);
     const sessionLabel = rd.session==='morning'?'☀️':'🌤️';
-    return `<button class="rtab ${r===ST.activeRound?'active':''} ${d?'done':''}" onclick="setRound(${r})">${sessionLabel} Tour ${r+1}${d?' ✓':''}<span class="rtab-time">${rd.roundTime||''}</span></button>`;
+    const shortLabel = (rd.waveLabel||`Tour ${r+1}`).replace(/^[☀️🌤️]+\s*/,'');
+    return `<button class="rtab ${r===ST.activeRound?'active':''} ${d?'done':''}" onclick="setRound(${r})">${sessionLabel} ${shortLabel}${d?' ✓':''}<span class="rtab-time">${rd.roundTime||''}</span></button>`;
   }).join('');
 }
 
 function isRoundDone(r){
   const rd=ST.schedule[r]; if(!rd) return false;
-  const halls=[rd.hall1, rd.hall2].filter(Boolean);
+  const halls=rd.halls;
   return halls.every(h=>h.matches.every((_,mi)=>{
     const flatMi = getGlobalMatchIdx(r, h, mi);
     const res=getRes(r, flatMi); return res.ga!==''&&res.gb!=='';
@@ -1052,8 +1251,8 @@ function checkDone(){ const el=document.getElementById('btnFinDiv'); if(el) el.s
 // Calcul index global d'un match dans un round (salle1 puis salle2)
 function getGlobalMatchIdx(r, hall, localMi){
   const rd=ST.schedule[r]; if(!rd) return localMi;
-  if(!rd.hall2 || hall===rd.hall1) return localMi;
-  return rd.hall1.matches.length + localMi;
+  const hi=rd.halls.indexOf(hall);
+  return getGlobalMatchIdxFromHallIdx(r, hi<0?0:hi, localMi);
 }
 
 function renderSubInfo(){
@@ -1077,7 +1276,7 @@ function renderMatches(){
     <span style="font-size:12px;color:var(--muted)">→ ${endTime} · ${mt} min</span>
     <span style="margin-left:auto;font-size:12px;color:var(--dim)">${round.waveLabel||''}</span>
   </div>`:'';
-  const halls=[round.hall1, round.hall2?round.hall2:null].filter(Boolean);
+  const halls=round.halls;
   let matchOffset=0;
   el.innerHTML=timeHeader+halls.map((h,hi)=>{
     const hallHtml=h.matches.map((m,localMi)=>{
@@ -1110,13 +1309,14 @@ function renderMatches(){
         <div class="mt-r">
           <div class="mt-court">${h.label?h.label+' · ':''}TERRAIN ${localMi+1}</div>
           ${mkTeamCard(m.tB)}
-          ${isScorer()?`<button onclick="printTeamScheduleSingle('${m.tA}')" title="Fiche équipe A" style="background:none;border:1px solid var(--bdr);color:var(--muted);border-radius:6px;padding:3px 8px;cursor:pointer;font-size:11px;margin-top:4px;margin-right:4px">🖨 A</button><button onclick="printTeamScheduleSingle('${m.tB}')" title="Fiche équipe B" style="background:none;border:1px solid var(--bdr);color:var(--muted);border-radius:6px;padding:3px 8px;cursor:pointer;font-size:11px;margin-top:4px">🖨 B</button>`:''}
+          ${isScorer()?`<button onclick="printTeamScheduleSingle('${m.tA}')" title="Fiche équipe A" style="background:none;border:1px solid var(--bdr);color:var(--muted);border-radius:6px;padding:3px 8px;cursor:pointer;font-size:11px;margin-top:4px;margin-right:4px">🖨 A</button><button onclick="printTeamScheduleSingle('${m.tB}')" title="Fiche équipe B" style="background:none;border:1px solid var(--bdr);color:var(--muted);border-radius:6px;padding:3px 8px;cursor:pointer;font-size:11px;margin-top:4px;margin-right:4px">🖨 B</button>`:''}${isAdmin()?`<button onclick="openEditTeam('${m.tA}')" title="Modifier équipe A" style="background:none;border:1px solid var(--blu);color:var(--blu);border-radius:6px;padding:3px 8px;cursor:pointer;font-size:11px;margin-top:4px;margin-right:4px">✏️ A</button><button onclick="openEditTeam('${m.tB}')" title="Modifier équipe B" style="background:none;border:1px solid var(--blu);color:var(--blu);border-radius:6px;padding:3px 8px;cursor:pointer;font-size:11px;margin-top:4px">✏️ B</button>`:''}
         </div>
       </div>`;
     }).join('');
-    const byeHtml = h.bye ? `<div class="info info-y" style="margin-top:8px">🟡 Exempte : <strong>${tName(h.bye)}</strong>${isScorer()?` <button onclick="printTeamScheduleSingle('${h.bye}')" style="background:none;border:1px solid var(--ylw);color:var(--ylw);border-radius:5px;padding:2px 8px;cursor:pointer;font-size:11px;margin-left:8px">🖨 Fiche</button>`:''}` : '';
+    const byes=h.byes||[];
+    const byeHtml = byes.length ? `<div class="info info-y" style="margin-top:8px">🟡 Exempt${byes.length>1?'s':''} : ${byes.map(id=>`<strong>${tName(id)}</strong>${isScorer()?` <button onclick="printTeamScheduleSingle('${id}')" style="background:none;border:1px solid var(--ylw);color:var(--ylw);border-radius:5px;padding:2px 6px;cursor:pointer;font-size:10px;margin-left:4px">🖨</button>`:''}`).join(' · ')}</div>` : '';
     matchOffset += h.matches.length;
-    return (h.label?`<div class="wave-sep"><span class="wave-sep-lbl">🏟️ ${h.label}</span></div>`:'') + hallHtml + (h.bye?byeHtml+'</div>':'');
+    return (h.label?`<div class="wave-sep"><span class="wave-sep-lbl">🏟️ ${h.label}</span></div>`:'') + hallHtml + (byes.length?byeHtml+'</div>':'');
   }).join('');
 }
 
@@ -1134,24 +1334,23 @@ function computeStandings(){
 
   // Compensation bye (exemptions)
   ST.schedule.forEach((rd,r)=>{
-    const roundHasScore=[rd.hall1,rd.hall2].filter(Boolean).some((h,hi)=>
+    const roundHasScore=rd.halls.some((h,hi)=>
       h.matches.some((_,mi)=>{
         const gmi=getGlobalMatchIdxFromHallIdx(r,hi,mi);
         const res=getRes(r,gmi); return res.ga!==''||res.gb!=='';
       })
     );
     if(!roundHasScore) return;
-    if(rd.hall1.bye && stats[rd.hall1.bye]){
-      const s=stats[rd.hall1.bye]; s.byeTours++;s.pts+=2;s.d++;s.played++;
-    }
-    if(rd.hall2&&rd.hall2.bye&&stats[rd.hall2.bye]){
-      const s=stats[rd.hall2.bye]; s.byeTours++;s.pts+=2;s.d++;s.played++;
-    }
+    rd.halls.forEach(h=>{
+      (h.byes||[]).forEach(id=>{
+        const s=stats[id]; if(s){ s.byeTours++;s.pts+=2;s.d++;s.played++; }
+      });
+    });
   });
 
   // Matchs
   ST.schedule.forEach((rd,r)=>{
-    [rd.hall1,rd.hall2].filter(Boolean).forEach((h,hi)=>{
+    rd.halls.forEach((h,hi)=>{
       h.matches.forEach((m,localMi)=>{
         const gmi=getGlobalMatchIdxFromHallIdx(r,hi,localMi);
         const res=getRes(r,gmi);
@@ -1187,8 +1386,9 @@ function computeStandings(){
 
 function getGlobalMatchIdxFromHallIdx(r, hallIdx, localMi){
   const rd=ST.schedule[r]; if(!rd) return localMi;
-  if(hallIdx===0) return localMi;
-  return rd.hall1.matches.length + localMi;
+  let offset=0;
+  for(let i=0;i<hallIdx;i++) offset += rd.halls[i].matches.length;
+  return offset+localMi;
 }
 
 function stblHTML(arr,limit){
@@ -1366,7 +1566,7 @@ window.printPlanning = function(){
   let body=`<div style="font-size:18px;font-weight:700;margin-bottom:14px;border-bottom:2px solid #333;padding-bottom:8px">Planning Interclub Pickleball · ${ST.teams.slice(0,ST.cfg.n).length} équipes</div>`;
   ST.schedule.forEach((rd,ri)=>{
     const session=rd.session==='morning'?'☀️ MATIN':'🌤️ APRÈS-MIDI';
-    const halls=[rd.hall1,rd.hall2].filter(Boolean);
+    const halls=rd.halls;
     body+=`<div style="margin-bottom:14px;page-break-inside:avoid">
       <div style="background:#0d1a2e;color:#fff;padding:7px 12px;font-size:13px;font-weight:700">${session} — Tour ${ri+1} · ${rd.roundTime}${rd.subs.length?' · Exempt: '+rd.subs.map(id=>tName(id)).join(', '):''}</div>
       <div style="padding:8px;background:#f7f3ee;border:1px solid #ccc;border-top:none">
@@ -1440,6 +1640,367 @@ document.addEventListener('DOMContentLoaded',()=>{
     if(si) si.style.display=(n===4&&window.USER_ROLE==='spectator')?'':'none';
   };
 });
+
+// ══════════════════════════════════════════════════════════
+// CLAVIER NUMÉRIQUE MOBILE
+// ══════════════════════════════════════════════════════════
+let _npState = { r:0, mi:0, team:'A', valA:'', valB:'', tAName:'', tBName:'' };
+
+window.openNumpad = function(r, mi, tAName, tBName){
+  if(!isScorer()) return;
+  const res = getRes(r, mi);
+  _npState = {
+    r, mi, team:'A',
+    valA: res.ga!==''?String(res.ga):'',
+    valB: res.gb!==''?String(res.gb):'',
+    tAName, tBName
+  };
+  document.getElementById('numpadTeamA').textContent = tAName;
+  document.getElementById('numpadTeamB').textContent = tBName;
+  numpadSelectTeam('A');
+  numpadRefreshDisplay();
+  document.getElementById('numpadOverlay').classList.add('open');
+};
+
+window.closeNumpad = function(){
+  document.getElementById('numpadOverlay').classList.remove('open');
+};
+
+window.numpadSelectTeam = function(team){
+  _npState.team = team;
+  const btnA = document.getElementById('numpadBtnA');
+  const btnB = document.getElementById('numpadBtnB');
+  btnA.style.cssText = team==='A'
+    ? 'flex:1;padding:8px;border-radius:8px;font-family:Oswald,sans-serif;font-size:13px;cursor:pointer;border:2px solid var(--grn);background:var(--grn);color:#fff'
+    : 'flex:1;padding:8px;border-radius:8px;font-family:Oswald,sans-serif;font-size:13px;cursor:pointer;border:2px solid var(--bdr2);background:var(--s2);color:var(--muted)';
+  btnB.style.cssText = team==='B'
+    ? 'flex:1;padding:8px;border-radius:8px;font-family:Oswald,sans-serif;font-size:13px;cursor:pointer;border:2px solid var(--grn);background:var(--grn);color:#fff'
+    : 'flex:1;padding:8px;border-radius:8px;font-family:Oswald,sans-serif;font-size:13px;cursor:pointer;border:2px solid var(--bdr2);background:var(--s2);color:var(--muted)';
+};
+
+window.numpadPress = function(digit){
+  const key = _npState.team==='A' ? 'valA' : 'valB';
+  if(_npState[key].length >= 2) _npState[key] = String(digit);
+  else _npState[key] += String(digit);
+  numpadRefreshDisplay();
+};
+
+window.numpadDel = function(){
+  const key = _npState.team==='A' ? 'valA' : 'valB';
+  _npState[key] = _npState[key].slice(0,-1);
+  numpadRefreshDisplay();
+};
+
+function numpadRefreshDisplay(){
+  document.getElementById('numpadValA').textContent = _npState.valA==='' ? '–' : _npState.valA;
+  document.getElementById('numpadValB').textContent = _npState.valB==='' ? '–' : _npState.valB;
+  const ga = _npState.valA===''?'':+_npState.valA;
+  const gb = _npState.valB===''?'':+_npState.valB;
+  const elA = document.getElementById('numpadValA');
+  const elB = document.getElementById('numpadValB');
+  if(ga!==''&&gb!==''){
+    elA.style.color = ga>gb?'var(--grn)':ga<gb?'var(--red)':'var(--ylw)';
+    elB.style.color = gb>ga?'var(--grn)':gb<ga?'var(--red)':'var(--ylw)';
+  } else {
+    elA.style.color = 'var(--ink2)';
+    elB.style.color = 'var(--ink2)';
+  }
+}
+
+window.numpadConfirm = async function(){
+  const {r, mi, valA, valB} = _npState;
+  const key = r+'-'+mi;
+  const cur = { ga: valA===''?'':+valA, gb: valB===''?'':+valB };
+  ST.results[key] = cur;
+  if(typeof saveResult==='function') await saveResult(key, cur.ga, cur.gb);
+  closeNumpad();
+  renderMatches(); renderMiniStandings(); checkDone();
+  if(typeof updateMural==='function' && document.getElementById('muralOverlay').style.display!=='none') updateMural();
+};
+
+// Patcher renderMatches pour ajouter bouton pavé numérique sur mobile
+const _origRenderMatches = window.renderMatches || function(){};
+// On enrichit le rendu des matchs avec le pavé : le bouton "📱" apparaît sur chaque carte de match
+// On le fait via la fonction openNumpad déjà exposée globalement, appelée depuis les cartes HTML
+
+// ══════════════════════════════════════════════════════════
+// MODE MURAL (grand écran public)
+// ══════════════════════════════════════════════════════════
+let _muralInterval = null;
+
+window.openMural = function(){
+  const ov = document.getElementById('muralOverlay');
+  ov.style.display = 'block';
+  updateMural();
+  updateMuralClock();
+  _muralInterval = setInterval(()=>{ updateMural(); updateMuralClock(); }, 10000);
+};
+
+window.closeMural = function(){
+  document.getElementById('muralOverlay').style.display = 'none';
+  clearInterval(_muralInterval);
+};
+
+function updateMuralClock(){
+  const el = document.getElementById('muralClock');
+  if(!el) return;
+  const now = new Date();
+  el.textContent = now.getHours().toString().padStart(2,'0')+':'+now.getMinutes().toString().padStart(2,'0');
+}
+
+window.updateMural = function(){
+  const el = document.getElementById('muralStandings');
+  if(!el || !ST.schedule.length) return;
+  const st = computeStandings();
+  const med = ['🥇','🥈','🥉'];
+  el.innerHTML = st.map((s,i)=>{
+    const gd = s.gf-s.ga;
+    const isTop3 = i<3;
+    const bgColor = i===0?'linear-gradient(135deg,#1a1208,#2a2008)':i===1?'linear-gradient(135deg,#101520,#181e30)':i===2?'linear-gradient(135deg,#141008,#201808)':'var(--s1)';
+    const borderColor = i===0?'#d4a820':i===1?'#7090c0':i===2?'#a06030':'var(--bdr)';
+    return `<div style="background:${bgColor};border:2px solid ${borderColor};border-radius:12px;padding:16px 18px;display:flex;align-items:center;gap:14px">
+      <div style="font-family:'Oswald',sans-serif;font-size:${isTop3?36:28}px;min-width:50px;text-align:center;color:${i===0?'#d4a820':i===1?'#7090c0':i===2?'#a06030':'rgba(255,255,255,.4)'}">${med[i]||i+1}</div>
+      <div style="flex:1;min-width:0">
+        <div style="font-family:'Oswald',sans-serif;font-size:${isTop3?20:16}px;color:#e8edf5;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${s.name}</div>
+        <div style="font-size:11px;color:rgba(255,255,255,.4);margin-top:2px">${s.club!=='—'?s.club+' · ':''} ${s.p1} & ${s.p2}</div>
+        <div style="font-size:11px;color:rgba(255,255,255,.5);margin-top:3px">${s.played}J · ${s.w}V · ${s.d}N · ${s.l}D · BP:${s.gf} BC:${s.ga}</div>
+      </div>
+      <div style="text-align:right;flex-shrink:0">
+        <div style="font-family:'Oswald',sans-serif;font-size:${isTop3?36:28}px;color:var(--grn);line-height:1">${s.pts}</div>
+        <div style="font-size:10px;color:rgba(255,255,255,.4);letter-spacing:1px">PTS</div>
+        <div style="font-size:12px;color:${gd>=0?'var(--grn)':'var(--red)'};font-weight:700;margin-top:2px">${gd>0?'+':''}${gd}</div>
+      </div>
+    </div>`;
+  }).join('');
+};
+
+// ══════════════════════════════════════════════════════════
+// FICHE INDIVIDUELLE PAR ÉQUIPE (impression)
+// ══════════════════════════════════════════════════════════
+window.printTeamSchedule = function(tid){
+  if(!ST.schedule.length) return null;
+  const team=tObj(tid); if(!team) return null;
+  _ensureRoundTimes();
+  const rows=[];
+  ST.schedule.forEach((rd,r)=>{
+    const halls=rd.halls;
+    const session=rd.session==='morning'?'☀️ Matin':'🌤️ Aprem';
+    halls.forEach((h,hi)=>{
+      if((h.byes||[]).includes(tid)){
+        rows.push({r,time:rd.roundTime||'',session,waveLabel:rd.waveLabel||('Vague '+(r+1)),type:'bye',court:'—',opp:null});
+      }
+      h.matches.forEach((m,localMi)=>{
+        const gmi=getGlobalMatchIdxFromHallIdx(r,hi,localMi);
+        if(m.tA===tid||m.tB===tid){
+          const isA=m.tA===tid;
+          const opp=isA?m.tB:m.tA;
+          const res=getRes(r,gmi);
+          const myS=isA?res.ga:res.gb;
+          const oppS=isA?res.gb:res.ga;
+          const courtLabel=`T${localMi+1}${h.label?' ('+h.label+')':''}`;
+          rows.push({r,time:rd.roundTime||'',session,waveLabel:rd.waveLabel||('Vague '+(r+1)),type:'match',court:courtLabel,opp,myS,oppS,gmi});
+        }
+      });
+    });
+  });
+  let pts=0,wins=0,draws=0,losses=0;
+  const tableRows=rows.map(row=>{
+    if(row.type==='bye'){
+      pts+=2; draws++;
+      return `<tr class="row-done" style="background:#fffbe8;border-left:4px solid #d4a030">
+        <td style="color:#888;font-size:10px">${row.waveLabel}</td>
+        <td style="font-weight:700;color:#1a2540">${row.time}</td>
+        <td style="font-size:10px;color:#666">${row.session}</td>
+        <td>—</td>
+        <td colspan="2" style="color:#b87c00;font-weight:700">🟡 Exempt</td>
+        <td style="color:#b87c00;font-size:10px">+2 pts</td>
+      </tr>`;
+    }
+    const done=row.myS!==''&&row.oppS!=='';
+    let result='',bg='#fff',rc='#999',border='4px solid transparent';
+    if(done){ const ms=+row.myS,os=+row.oppS;
+      if(ms>os){result='✅ Victoire';bg='#e8f9ee';rc='#1e8c45';border='4px solid #2bb35c';wins++;pts+=3;}
+      else if(ms<os){result='❌ Défaite';bg='#fdeceb';rc='#c0281a';border='4px solid #d6432f';losses++;}
+      else{result='🟡 Nul';bg='#fffbe8';rc='#b87c00';border='4px solid #d4a030';draws++;pts+=2;}
+    }
+    const oppTeam=tObj(row.opp);
+    const sc=done?`<strong style="font-size:14px">${row.myS}–${row.oppS}</strong>`:'–';
+    return `<tr class="${done?'row-done':''}" style="background:${bg};border-left:${border}">
+      <td style="color:#888;font-size:10px">${row.waveLabel}</td>
+      <td style="font-weight:700;color:#1a2540;font-size:13px">${row.time}</td>
+      <td style="font-size:10px;color:#666">${row.session}</td>
+      <td style="color:#7040b0;font-weight:700">${row.court}</td>
+      <td><strong>${oppTeam?oppTeam.name:row.opp}</strong>${oppTeam&&oppTeam.club&&oppTeam.club!=='—'?`<br><span style="color:#888;font-size:9px">${oppTeam.club}</span>`:''}${oppTeam?`<br><span style="color:#aaa;font-size:9px">${oppTeam.p1} · ${oppTeam.p2}</span>`:''}</td>
+      <td style="text-align:center">${sc}</td>
+      <td style="color:${rc};font-weight:700;font-size:11px">${done?result:'À jouer'}</td>
+    </tr>`;
+  });
+  const st=computeStandings();
+  const rank=st.findIndex(s=>s.id===tid)+1;
+  const rankStr=rank>0?` &nbsp;·&nbsp; <span style="color:#1560c0">${rank}${rank===1?'er':'e'}/${st.length}</span>`:'';
+  return `<div class="fiche">
+    <div class="fiche-hdr">
+      <span><strong>${team.name}</strong>&nbsp;${team.club&&team.club!=='—'?`<span style="background:#e8f0ff;color:#1560c0;border-radius:4px;padding:1px 6px;font-size:10px;font-weight:700">${team.club}</span>`:''}</span>
+      <span style="font-size:11px;color:#666">${rankStr}</span>
+    </div>
+    <div class="fiche-joueurs">👤 ${team.p1} &nbsp;&amp;&nbsp; ${team.p2} &nbsp;·&nbsp; ${'⭐'.repeat(team.lv||1)}</div>
+    <table>
+      <thead><tr>
+        <th>Vague</th><th>Heure</th><th>Session</th><th>Terrain</th><th>Adversaire</th><th>Score</th><th>Résultat</th>
+      </tr></thead>
+      <tbody>${tableRows.join('')}</tbody>
+    </table>
+    <div class="fiche-bilan">Bilan : <strong>${pts} pts</strong> &nbsp;·&nbsp; ${wins}V ${draws}N ${losses}D</div>
+  </div>`;
+};
+
+// Toutes les fiches dans une seule fenêtre — plusieurs par page A4
+window.printAllTeamSchedules = function(){
+  if(!ST.schedule.length){ alert('Aucun planning généré.'); return; }
+  const limit = ST.cfg?.n || ST.teams.length;
+  const fiches=ST.teams.slice(0,limit).map(t=>printTeamSchedule(t.id)).filter(Boolean);
+  if(!fiches.length){ alert('Aucune fiche à imprimer.'); return; }
+  const win=window.open('','_allfiches','width=1000,height=750');
+  win.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Fiches équipes</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:Arial,sans-serif;font-size:9px;background:#fff;color:#111}
+    .fiche{border:1px solid #bbb;border-radius:2px;padding:4px 5px;break-inside:avoid;margin-bottom:0}
+    .fiche-hdr{font-size:10px;font-weight:700;margin-bottom:2px;padding-bottom:2px;border-bottom:1.5px solid #1a2540;display:flex;justify-content:space-between}
+    .fiche-joueurs{font-size:8px;color:#555;margin-bottom:2px}
+    table{width:100%;border-collapse:collapse;font-size:8px}
+    th{background:#1a2540;color:#fff;padding:2px 4px;text-align:left;font-size:8px}
+    td{padding:1.5px 4px;border-bottom:1px solid #eee;vertical-align:middle}
+    .fiche-bilan{margin-top:2px;font-size:9px;font-weight:700;color:#1a2540;text-align:right}
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:4px;padding:4px}
+    @media print{
+      @page{size:A4 portrait;margin:4mm}
+      html{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+      body{margin:0}
+      .noprint{display:none!important}
+      .fiche{break-inside:avoid;page-break-inside:avoid}
+      th{-webkit-print-color-adjust:exact;print-color-adjust:exact;background:#1a2540!important;color:#fff!important}
+      tr.row-done td{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+      tr{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+      .grid{gap:3px;padding:0}
+    }
+  </style></head><body>
+  <div class="noprint" style="padding:8px 10px;background:#f0f4fa;border-bottom:1px solid #ccc;display:flex;align-items:center;gap:12px">
+    <strong>🏓 Fiches équipes — ${fiches.length} équipes</strong>
+    <button onclick="window.print()" style="padding:6px 18px;background:#1a7a3a;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px">🖨 Imprimer tout</button>
+    <span style="font-size:11px;color:#666">2 fiches par colonne, format dense · pensez à désactiver en-têtes/pieds de page dans les options d'impression du navigateur</span>
+  </div>
+  <div class="grid">${fiches.join('')}</div>
+  </body></html>`);
+  win.document.close(); setTimeout(()=>win.print(),500);
+};
+
+// Version fiche individuelle (ouvre une fenêtre séparée)
+window.printTeamScheduleSingle = function(tid){
+  const html=printTeamSchedule(tid); if(!html) return;
+  const team=tObj(tid); if(!team) return;
+  const win=window.open('','_team_'+tid,'width=900,height=600');
+  win.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Fiche ${team.name}</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:Arial,sans-serif;font-size:12px;background:#fff;color:#111;padding:12px}
+    .fiche{border:none}
+    .fiche-hdr{font-size:15px;font-weight:700;margin-bottom:8px;padding-bottom:6px;border-bottom:2px solid #1a2540;display:flex;justify-content:space-between;align-items:flex-end}
+    .fiche-joueurs{font-size:11px;color:#444;margin-bottom:8px}
+    table{width:100%;border-collapse:collapse}
+    th{background:#1a2540;color:#fff;padding:5px 8px;text-align:left;font-size:11px}
+    td{padding:5px 8px;border-bottom:1px solid #eee;vertical-align:middle;font-size:11px}
+    .fiche-bilan{margin-top:8px;font-size:13px;font-weight:700;color:#1a2540;padding:6px 8px;background:#f0f4ff;border-radius:4px}
+    tr.row-done td{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+    @media print{
+      @page{size:A4 portrait;margin:8mm}
+      /* Supprimer en-têtes et pieds de page navigateur */
+      @page{margin-top:5mm;margin-bottom:5mm}
+      html{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+      .noprint{display:none!important}
+      body{padding:0;margin:0}
+      th{-webkit-print-color-adjust:exact;print-color-adjust:exact;background:#1a2540!important;color:#fff!important}
+      tr{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+    }
+  </style></head><body>
+  ${html}
+  <div class="noprint" style="margin-top:14px;display:flex;gap:8px">
+    <button onclick="window.print()" style="padding:7px 20px;background:#1a7a3a;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px">🖨 Imprimer</button>
+    <button onclick="window.close()" style="padding:7px 16px;background:#eee;border:none;border-radius:6px;cursor:pointer;font-size:13px">Fermer</button>
+  </div>
+  </body></html>`);
+  win.document.close(); setTimeout(()=>win.print(),400);
+};
+
+// ══════════════════════════════════════════════════════════
+// EXPORT CLASSEMENT PDF (via impression navigateur)
+// ══════════════════════════════════════════════════════════
+window.exportStandingsPDF = function(){
+  const st = computeStandings();
+  const roundInfo = ST.schedule.length>0 ? `Après ${ST.activeRound+1} tour${ST.activeRound>0?'s':''} / ${ST.schedule.length}` : '';
+  const rows = st.map((s,i)=>{
+    const gd=s.gf-s.ga;
+    const med=['🥇','🥈','🥉'];
+    const rkBg = i===0?'#d4a820':i===1?'#7090c0':i===2?'#a06030':'#888';
+    return `<tr style="background:${i%2===0?'#fff':'#f8f8f8'}">
+      <td style="padding:7px 10px;text-align:center;font-weight:700;color:${rkBg};font-size:${i<3?16:14}px">${med[i]||i+1}</td>
+      <td style="padding:7px 10px;font-weight:700">${s.name}</td>
+      <td style="padding:7px 10px;color:#666;font-size:11px">${s.club!=='—'?s.club:''}</td>
+      <td style="padding:7px 10px;font-size:11px;color:#555">${s.p1}<br>${s.p2}</td>
+      <td style="padding:7px 10px;text-align:center">${s.played}</td>
+      <td style="padding:7px 10px;text-align:center;color:#1e8c45;font-weight:700">${s.w}</td>
+      <td style="padding:7px 10px;text-align:center;color:#d4890a;font-weight:700">${s.d}</td>
+      <td style="padding:7px 10px;text-align:center;color:#c0281a;font-weight:700">${s.l}</td>
+      <td style="padding:7px 10px;text-align:center">${s.gf}</td>
+      <td style="padding:7px 10px;text-align:center">${s.ga}</td>
+      <td style="padding:7px 10px;text-align:center;color:${gd>=0?'#1e8c45':'#c0281a'};font-weight:700">${gd>0?'+':''}${gd}</td>
+      <td style="padding:7px 10px;text-align:center;font-size:18px;font-weight:900;color:#1e8c45">${s.pts}</td>
+    </tr>`;
+  }).join('');
+
+  const body = `
+    <div style="font-family:sans-serif;margin-bottom:16px">
+      <div style="font-size:22px;font-weight:700;color:#0d1a2e;margin-bottom:4px">🏓 Classement Interclub Pickleball</div>
+      <div style="font-size:13px;color:#555">${ST.teams.length} équipes inscrites &nbsp;·&nbsp; ${roundInfo} &nbsp;·&nbsp; Généré le ${new Date().toLocaleDateString('fr-FR')} à ${new Date().toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'})}</div>
+    </div>
+    <table border="0" cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;font-family:sans-serif;font-size:13px;border:1px solid #ccc">
+      <thead><tr style="background:#0d1a2e;color:#fff">
+        <th style="padding:8px 10px">#</th>
+        <th style="padding:8px 10px;text-align:left">Équipe</th>
+        <th style="padding:8px 10px;text-align:left">Club</th>
+        <th style="padding:8px 10px;text-align:left">Joueurs</th>
+        <th style="padding:8px 10px">J</th>
+        <th style="padding:8px 10px;color:#5ad080">V</th>
+        <th style="padding:8px 10px;color:#ffd080">N</th>
+        <th style="padding:8px 10px;color:#ff8070">D</th>
+        <th style="padding:8px 10px">BP</th>
+        <th style="padding:8px 10px">BC</th>
+        <th style="padding:8px 10px">+/-</th>
+        <th style="padding:8px 10px;color:#5ad080">Pts</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <div style="margin-top:10px;font-size:10px;color:#999;font-family:sans-serif">
+      V=Victoire (3pts) · N=Nul (2pts) · D=Défaite (0pt) · BP=Buts pour · BC=Buts contre · +/-=Goal average
+    </div>`;
+
+  const win=window.open('','_classement_pdf','width=1000,height=750');
+  win.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Classement Interclub</title>
+  <style>
+    body{margin:16px 20px;font-size:12px}
+    @page{size:A4 landscape;margin:10mm}
+    @media print{.noprint{display:none}body{margin:0}}
+    table{border-color:#ddd}
+  </style></head><body>${body}
+  <div class="noprint" style="margin-top:20px;display:flex;gap:10px">
+    <button onclick="window.print()" style="padding:8px 20px;background:#1e8c45;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px">🖨 Imprimer / Enregistrer en PDF</button>
+    <button onclick="window.close()" style="padding:8px 20px;background:#eee;border:none;border-radius:6px;cursor:pointer;font-size:13px">Fermer</button>
+  </div>
+  </body></html>`);
+  win.document.close();
+  setTimeout(()=>win.print(),400);
+};
+
 </script>
 
 <style>
@@ -1496,7 +2057,7 @@ html,body{ height:100%; background:var(--s0); color:var(--ink); font-family:'Exo
 .admin-panel-ttl{ font-family:'Oswald',sans-serif;font-size:16px;letter-spacing:1px;color:var(--ylw);margin-bottom:12px; }
 
 /* ── SPECTATOR NAV ───────────────────────────────────── */
-.spec-nav{ display:none;background:var(--s1);border-bottom:3px solid var(--bdr2);padding:0 16px; }
+.spec-nav{ display:none;background:var(--s1);border-bottom:3px solid var(--bdr2);padding:0 16px;overflow-x:auto; }
 .spec-nav.visible{ display:flex;gap:0;align-items:center; }
 .spec-nav-btn{ padding:13px 22px;font-family:'Oswald',sans-serif;font-size:14px;letter-spacing:.8px;text-transform:uppercase;color:var(--muted);background:none;border:none;border-bottom:3px solid transparent;cursor:pointer;transition:all .15s;margin-bottom:-3px; }
 .spec-nav-btn:hover{ color:var(--ink); }
@@ -1703,44 +2264,50 @@ input[type=checkbox]{ width:auto;margin-right:6px; }
   <div class="login-box">
     <div class="login-brand">🏓 Interclub</div>
     <div class="login-sub">Pickleball · Gestion de Tournoi</div>
-    <div id="authMsg" style="text-align:center;font-size:13px;min-height:18px;margin-bottom:12px"></div>
+    <div style="text-align:center;font-size:10px;color:var(--dim);margin-bottom:14px;letter-spacing:1px">build v5.7 — retour connexion staff depuis spectateur</div>
+    <div id="authMsg" style="text-align:center;font-size:13px;min-height:18px;margin-bottom:16px;color:var(--red)"></div>
 
-    <!-- Accès spectateur -->
-    <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:20px">
-      <div style="text-align:center;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:var(--muted);margin-bottom:4px">Accès spectateur</div>
-      <div style="display:flex;gap:8px">
-        <button onclick="enterLiveModeAndGo(4)" style="flex:1;padding:10px 8px;background:linear-gradient(135deg,#e8f4fc,#d0e8f8);border:1.5px solid #90c8e8;border-radius:9px;color:#0060a0;font-family:'Oswald',sans-serif;font-size:13px;letter-spacing:.6px;cursor:pointer;text-transform:uppercase;transition:all .2s;display:flex;align-items:center;justify-content:center;gap:5px">
-          <span class="spec-nav-live-dot"></span> Live
+    <!-- ══ ZONE SPECTATEURS ══ -->
+    <div style="background:linear-gradient(135deg,#0d2a4a,#103c6a);border-radius:14px;padding:18px 16px;margin-bottom:18px;border:2px solid rgba(100,180,255,.3)">
+      <div style="font-family:'Oswald',sans-serif;font-size:22px;font-weight:700;letter-spacing:1.5px;color:#7adcff;text-align:center;margin-bottom:4px;text-transform:uppercase">👁 Accès Spectateur</div>
+      <div style="font-size:12px;color:rgba(180,210,255,.7);text-align:center;margin-bottom:14px">Suivez le tournoi en temps réel — sans inscription</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
+        <button onclick="enterLiveModeAndGo(4)" style="padding:16px 8px;background:linear-gradient(135deg,#1a4a7a,#1560c0);border:2px solid #4090e0;border-radius:10px;color:#fff;font-family:'Oswald',sans-serif;font-size:18px;letter-spacing:.8px;cursor:pointer;text-transform:uppercase;transition:all .2s;display:flex;align-items:center;justify-content:center;gap:7px;font-weight:700">
+          <span class="spec-nav-live-dot"></span> LIVE
         </button>
-        <button onclick="enterLiveModeAndGo(5)" style="flex:1;padding:10px 8px;background:linear-gradient(135deg,#fef8e8,#fdf0c8);border:1.5px solid #d0a830;border-radius:9px;color:#806010;font-family:'Oswald',sans-serif;font-size:13px;letter-spacing:.6px;cursor:pointer;text-transform:uppercase;transition:all .2s;display:flex;align-items:center;justify-content:center;gap:5px">
-          🏆 Classement
+        <button onclick="enterLiveModeAndGo(5)" style="padding:16px 8px;background:linear-gradient(135deg,#4a3200,#8a6010);border:2px solid #d4a030;border-radius:10px;color:#ffd080;font-family:'Oswald',sans-serif;font-size:18px;letter-spacing:.8px;cursor:pointer;text-transform:uppercase;transition:all .2s;display:flex;align-items:center;justify-content:center;gap:7px;font-weight:700">
+          🏆 CLASSEMENT
         </button>
-        <button onclick="enterLiveModeAndGo('R')" style="flex:1;padding:10px 8px;background:linear-gradient(135deg,#f4f4f8,#eaeaf0);border:1.5px solid #c0c8d8;border-radius:9px;color:var(--ink);font-family:'Oswald',sans-serif;font-size:13px;letter-spacing:.6px;cursor:pointer;text-transform:uppercase;transition:all .2s;display:flex;align-items:center;justify-content:center;gap:5px">
-          📋 Règlement
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+        <button onclick="enterLiveModeAndGo('T')" style="padding:13px 8px;background:rgba(255,255,255,.08);border:1.5px solid rgba(255,255,255,.2);border-radius:10px;color:#c0d8f8;font-family:'Oswald',sans-serif;font-size:15px;letter-spacing:.6px;cursor:pointer;text-transform:uppercase;display:flex;align-items:center;justify-content:center;gap:6px">
+          👥 ÉQUIPES
+        </button>
+        <button onclick="enterLiveModeAndGo('R')" style="padding:13px 8px;background:rgba(255,255,255,.08);border:1.5px solid rgba(255,255,255,.2);border-radius:10px;color:#c0d8f8;font-family:'Oswald',sans-serif;font-size:15px;letter-spacing:.6px;cursor:pointer;text-transform:uppercase;display:flex;align-items:center;justify-content:center;gap:6px">
+          📋 RÈGLEMENT
         </button>
       </div>
     </div>
 
-    <div style="text-align:center;font-size:11px;color:var(--dim);margin-bottom:16px;position:relative">
-      <span style="background:var(--s1);padding:0 10px;position:relative;z-index:1">Connexion staff</span>
-      <div style="position:absolute;top:50%;left:0;right:0;height:1px;background:var(--bdr)"></div>
-    </div>
-
-    <div class="login-form">
-      <div>
-        <label>Email</label>
-        <input type="email" id="li_email" placeholder="votre@email.com" onkeydown="if(event.key==='Enter')loginEmail()">
+    <!-- ══ ZONE STAFF ══ -->
+    <div style="background:var(--s2);border:2px solid var(--bdr2);border-radius:14px;padding:16px">
+      <div style="font-family:'Oswald',sans-serif;font-size:16px;font-weight:700;letter-spacing:1px;color:var(--ylw);text-align:center;margin-bottom:12px;text-transform:uppercase">🔑 Connexion Staff</div>
+      <div class="login-form">
+        <div>
+          <label>Email</label>
+          <input type="email" id="li_email" placeholder="votre@email.com" onkeydown="if(event.key==='Enter')loginEmail()">
+        </div>
+        <div>
+          <label>Mot de passe</label>
+          <input type="password" id="li_pwd" placeholder="••••••••" onkeydown="if(event.key==='Enter')loginEmail()">
+        </div>
+        <button class="btn btn-g" style="width:100%;justify-content:center" onclick="loginEmail()">→ Se connecter</button>
+        <div class="login-divider">ou</div>
+        <button class="btn-google" onclick="loginGoogle()">
+          <svg width="18" height="18" viewBox="0 0 18 18"><path fill="#4285F4" d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844c-.209 1.125-.843 2.078-1.796 2.716v2.259h2.908c1.702-1.567 2.684-3.875 2.684-6.615z"/><path fill="#34A853" d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 0 0 9 18z"/><path fill="#FBBC05" d="M3.964 10.71A5.41 5.41 0 0 1 3.682 9c0-.593.102-1.17.282-1.71V4.958H.957A8.996 8.996 0 0 0 0 9c0 1.452.348 2.827.957 4.042l3.007-2.332z"/><path fill="#EA4335" d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 0 0 .957 4.958L3.964 6.29C4.672 4.163 6.656 3.58 9 3.58z"/></svg>
+          Continuer avec Google
+        </button>
       </div>
-      <div>
-        <label>Mot de passe</label>
-        <input type="password" id="li_pwd" placeholder="••••••••" onkeydown="if(event.key==='Enter')loginEmail()">
-      </div>
-      <button class="btn btn-g" style="width:100%;justify-content:center" onclick="loginEmail()">→ Se connecter</button>
-      <div class="login-divider">ou</div>
-      <button class="btn-google" onclick="loginGoogle()">
-        <svg width="18" height="18" viewBox="0 0 18 18"><path fill="#4285F4" d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844c-.209 1.125-.843 2.078-1.796 2.716v2.259h2.908c1.702-1.567 2.684-3.875 2.684-6.615z"/><path fill="#34A853" d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 0 0 9 18z"/><path fill="#FBBC05" d="M3.964 10.71A5.41 5.41 0 0 1 3.682 9c0-.593.102-1.17.282-1.71V4.958H.957A8.996 8.996 0 0 0 0 9c0 1.452.348 2.827.957 4.042l3.007-2.332z"/><path fill="#EA4335" d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 0 0 .957 4.958L3.964 6.29C4.672 4.163 6.656 3.58 9 3.58z"/></svg>
-        Continuer avec Google
-      </button>
     </div>
   </div>
 </div>
@@ -1852,7 +2419,9 @@ input[type=checkbox]{ width:auto;margin-right:6px; }
   <button class="spec-nav-btn" data-target="5" onclick="spectatorGoLive(5)">
     🏆 Classement
   </button>
+  <button class="spec-nav-btn" onclick="spectatorGoLive('T')">👥 Équipes</button>
   <button class="spec-nav-btn" onclick="toggleRules()">📋 Règlement</button>
+  <button class="spec-nav-btn" onclick="logout()" style="margin-left:auto;color:var(--red)">🔑 Connexion Staff</button>
 </nav>
 
 <!-- STEPS -->
@@ -1903,17 +2472,19 @@ input[type=checkbox]{ width:auto;margin-right:6px; }
     <div class="card-ttl">🌊 Configuration des vagues</div>
     <div class="fg">
 
-      <!-- Terrains -->
+      <!-- Salles et terrains -->
       <div class="fr">
         <div>
           <label>Heure de début matin</label>
           <input type="time" id="cfg_start" value="09:00" oninput="onCfgChange()">
         </div>
         <div>
-          <label>Salles</label>
+          <label>Nb de salles</label>
           <select id="cfg_halls" oninput="onCfgChange()">
             <option value="1">1 salle</option>
             <option value="2">2 salles</option>
+            <option value="3">3 salles</option>
+            <option value="4">4 salles</option>
           </select>
         </div>
         <div>
@@ -1924,6 +2495,9 @@ input[type=checkbox]{ width:auto;margin-right:6px; }
           <label>Terrains salle 2</label>
           <input type="number" id="cfg_t2" value="8" min="1" max="30" oninput="onCfgChange()">
         </div>
+      </div>
+      <div style="font-size:11px;color:var(--muted);margin-top:2px">
+        💡 Les équipes sont réparties équitablement entre les salles. Si une salle a un effectif impair, 1 équipe y est exempte par tour (rotation équitable, +2 pts / 0-0).
       </div>
 
       <!-- Répartition vagues -->
@@ -2154,6 +2728,10 @@ input[type=checkbox]{ width:auto;margin-right:6px; }
   <div id="btnFinDiv" style="display:none;margin-top:18px" class="flex g8 fw">
     <button class="btn btn-g" style="font-size:17px;padding:12px 28px" onclick="goTo(5)">🏆 Voir le classement final →</button>
   </div>
+  <!-- RÉINIT SCORES -->
+  <div style="margin-top:10px" data-role="admin">
+    <button class="btn btn-ghost btn-sm" onclick="resetAllScores()" style="color:var(--red);border-color:var(--red)">🔄 Réinitialiser tous les scores</button>
+  </div>
 
 </div>
 </div>
@@ -2176,9 +2754,24 @@ input[type=checkbox]{ width:auto;margin-right:6px; }
   <div class="flex g8 fw mt16">
     <button class="btn btn-ghost" onclick="goTo(4)">← Retour au tournoi</button>
     <button class="btn btn-b btn-sm" onclick="exportStandingsPDF()" data-role="admin">📄 Export PDF</button>
-    <button class="btn btn-ghost btn-sm" onclick="openMural()" data-role="admin">📺 Mode mural</button>
+    <button class="btn btn-ghost btn-sm" onclick="openMural()" data-role="admin">📺 Mural</button>
     <button class="btn btn-ghost btn-sm" onclick="printAllTeamSchedules()" data-role="admin">🖨 Toutes les fiches</button>
   </div>
+  <div class="flex g8 fw" style="margin-top:10px">
+    <button class="btn btn-y btn-sm" onclick="resetAllScores()" data-role="admin">🔄 Réinitialiser les scores</button>
+    <button class="btn btn-r btn-sm" onclick="newTournament()" data-role="admin">🆕 Nouveau tournoi</button>
+  </div>
+</div>
+</div>
+
+<!-- ══ PAGE ÉQUIPES SPECTATEUR ══ -->
+<div class="page" id="pageT">
+<div class="wrap">
+  <div class="sec-ttl">👥 Programme des équipes</div>
+  <div id="teamsSpecInfo" class="info info-b" style="margin-bottom:14px;font-size:12px">
+    Cliquez sur une équipe pour afficher et imprimer son programme complet.
+  </div>
+  <div id="teamsSpecGrid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:10px"></div>
 </div>
 </div>
 
@@ -2361,352 +2954,33 @@ input[type=checkbox]{ width:auto;margin-right:6px; }
 .numpad-ok:active{ background:var(--grn2); }
 </style>
 
-<script>
-// ══════════════════════════════════════════════════════════
-// CLAVIER NUMÉRIQUE MOBILE
-// ══════════════════════════════════════════════════════════
-let _npState = { r:0, mi:0, team:'A', valA:'', valB:'', tAName:'', tBName:'' };
 
-window.openNumpad = function(r, mi, tAName, tBName){
-  if(!isScorer()) return;
-  const res = getRes(r, mi);
-  _npState = {
-    r, mi, team:'A',
-    valA: res.ga!==''?String(res.ga):'',
-    valB: res.gb!==''?String(res.gb):'',
-    tAName, tBName
-  };
-  document.getElementById('numpadTeamA').textContent = tAName;
-  document.getElementById('numpadTeamB').textContent = tBName;
-  numpadSelectTeam('A');
-  numpadRefreshDisplay();
-  document.getElementById('numpadOverlay').classList.add('open');
-};
 
-window.closeNumpad = function(){
-  document.getElementById('numpadOverlay').classList.remove('open');
-};
-
-window.numpadSelectTeam = function(team){
-  _npState.team = team;
-  const btnA = document.getElementById('numpadBtnA');
-  const btnB = document.getElementById('numpadBtnB');
-  btnA.style.cssText = team==='A'
-    ? 'flex:1;padding:8px;border-radius:8px;font-family:Oswald,sans-serif;font-size:13px;cursor:pointer;border:2px solid var(--grn);background:var(--grn);color:#fff'
-    : 'flex:1;padding:8px;border-radius:8px;font-family:Oswald,sans-serif;font-size:13px;cursor:pointer;border:2px solid var(--bdr2);background:var(--s2);color:var(--muted)';
-  btnB.style.cssText = team==='B'
-    ? 'flex:1;padding:8px;border-radius:8px;font-family:Oswald,sans-serif;font-size:13px;cursor:pointer;border:2px solid var(--grn);background:var(--grn);color:#fff'
-    : 'flex:1;padding:8px;border-radius:8px;font-family:Oswald,sans-serif;font-size:13px;cursor:pointer;border:2px solid var(--bdr2);background:var(--s2);color:var(--muted)';
-};
-
-window.numpadPress = function(digit){
-  const key = _npState.team==='A' ? 'valA' : 'valB';
-  if(_npState[key].length >= 2) _npState[key] = String(digit);
-  else _npState[key] += String(digit);
-  numpadRefreshDisplay();
-};
-
-window.numpadDel = function(){
-  const key = _npState.team==='A' ? 'valA' : 'valB';
-  _npState[key] = _npState[key].slice(0,-1);
-  numpadRefreshDisplay();
-};
-
-function numpadRefreshDisplay(){
-  document.getElementById('numpadValA').textContent = _npState.valA==='' ? '–' : _npState.valA;
-  document.getElementById('numpadValB').textContent = _npState.valB==='' ? '–' : _npState.valB;
-  const ga = _npState.valA===''?'':+_npState.valA;
-  const gb = _npState.valB===''?'':+_npState.valB;
-  const elA = document.getElementById('numpadValA');
-  const elB = document.getElementById('numpadValB');
-  if(ga!==''&&gb!==''){
-    elA.style.color = ga>gb?'var(--grn)':ga<gb?'var(--red)':'var(--ylw)';
-    elB.style.color = gb>ga?'var(--grn)':gb<ga?'var(--red)':'var(--ylw)';
-  } else {
-    elA.style.color = 'var(--ink2)';
-    elB.style.color = 'var(--ink2)';
-  }
-}
-
-window.numpadConfirm = async function(){
-  const {r, mi, valA, valB} = _npState;
-  const key = r+'-'+mi;
-  const cur = { ga: valA===''?'':+valA, gb: valB===''?'':+valB };
-  ST.results[key] = cur;
-  if(typeof saveResult==='function') await saveResult(key, cur.ga, cur.gb);
-  closeNumpad();
-  renderMatches(); renderMiniStandings(); checkDone();
-  if(typeof updateMural==='function' && document.getElementById('muralOverlay').style.display!=='none') updateMural();
-};
-
-// Patcher renderMatches pour ajouter bouton pavé numérique sur mobile
-const _origRenderMatches = window.renderMatches || function(){};
-// On enrichit le rendu des matchs avec le pavé : le bouton "📱" apparaît sur chaque carte de match
-// On le fait via la fonction openNumpad déjà exposée globalement, appelée depuis les cartes HTML
-
-// ══════════════════════════════════════════════════════════
-// MODE MURAL (grand écran public)
-// ══════════════════════════════════════════════════════════
-let _muralInterval = null;
-
-window.openMural = function(){
-  const ov = document.getElementById('muralOverlay');
-  ov.style.display = 'block';
-  updateMural();
-  updateMuralClock();
-  _muralInterval = setInterval(()=>{ updateMural(); updateMuralClock(); }, 10000);
-};
-
-window.closeMural = function(){
-  document.getElementById('muralOverlay').style.display = 'none';
-  clearInterval(_muralInterval);
-};
-
-function updateMuralClock(){
-  const el = document.getElementById('muralClock');
-  if(!el) return;
-  const now = new Date();
-  el.textContent = now.getHours().toString().padStart(2,'0')+':'+now.getMinutes().toString().padStart(2,'0');
-}
-
-window.updateMural = function(){
-  const el = document.getElementById('muralStandings');
-  if(!el || !ST.schedule.length) return;
-  const st = computeStandings();
-  const med = ['🥇','🥈','🥉'];
-  el.innerHTML = st.map((s,i)=>{
-    const gd = s.gf-s.ga;
-    const isTop3 = i<3;
-    const bgColor = i===0?'linear-gradient(135deg,#1a1208,#2a2008)':i===1?'linear-gradient(135deg,#101520,#181e30)':i===2?'linear-gradient(135deg,#141008,#201808)':'var(--s1)';
-    const borderColor = i===0?'#d4a820':i===1?'#7090c0':i===2?'#a06030':'var(--bdr)';
-    return `<div style="background:${bgColor};border:2px solid ${borderColor};border-radius:12px;padding:16px 18px;display:flex;align-items:center;gap:14px">
-      <div style="font-family:'Oswald',sans-serif;font-size:${isTop3?36:28}px;min-width:50px;text-align:center;color:${i===0?'#d4a820':i===1?'#7090c0':i===2?'#a06030':'rgba(255,255,255,.4)'}">${med[i]||i+1}</div>
-      <div style="flex:1;min-width:0">
-        <div style="font-family:'Oswald',sans-serif;font-size:${isTop3?20:16}px;color:#e8edf5;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${s.name}</div>
-        <div style="font-size:11px;color:rgba(255,255,255,.4);margin-top:2px">${s.club!=='—'?s.club+' · ':''} ${s.p1} & ${s.p2}</div>
-        <div style="font-size:11px;color:rgba(255,255,255,.5);margin-top:3px">${s.played}J · ${s.w}V · ${s.d}N · ${s.l}D · BP:${s.gf} BC:${s.ga}</div>
-      </div>
-      <div style="text-align:right;flex-shrink:0">
-        <div style="font-family:'Oswald',sans-serif;font-size:${isTop3?36:28}px;color:var(--grn);line-height:1">${s.pts}</div>
-        <div style="font-size:10px;color:rgba(255,255,255,.4);letter-spacing:1px">PTS</div>
-        <div style="font-size:12px;color:${gd>=0?'var(--grn)':'var(--red)'};font-weight:700;margin-top:2px">${gd>0?'+':''}${gd}</div>
-      </div>
-    </div>`;
-  }).join('');
-};
-
-// ══════════════════════════════════════════════════════════
-// FICHE INDIVIDUELLE PAR ÉQUIPE (impression)
-// ══════════════════════════════════════════════════════════
-window.printTeamSchedule = function(tid){
-  if(!ST.schedule.length){ alert('Aucun planning généré.'); return; }
-  const team=tObj(tid); if(!team) return;
-  const rows=[];
-  ST.schedule.forEach((rd,r)=>{
-    const halls=[rd.hall1,rd.hall2].filter(Boolean);
-    const session=rd.session==='morning'?'Matin':'PM';
-    halls.forEach((h,hi)=>{
-      if(h.bye===tid){
-        rows.push({r,time:rd.roundTime,session,type:'bye',court:'—',opp:null});
-      }
-      h.matches.forEach((m,localMi)=>{
-        const gmi=getGlobalMatchIdxFromHallIdx(r,hi,localMi);
-        if(m.tA===tid||m.tB===tid){
-          const isA=m.tA===tid;
-          const opp=isA?m.tB:m.tA;
-          const res=getRes(r,gmi);
-          const myS=isA?res.ga:res.gb;
-          const oppS=isA?res.gb:res.ga;
-          rows.push({r,time:rd.roundTime,session,type:'match',court:`T${localMi+1}${h.label?' '+h.label:''}`,opp,myS,oppS,gmi});
-        }
-      });
-    });
-  });
-  let pts=0,wins=0,draws=0,losses=0;
-  const tableRows=rows.map(row=>{
-    if(row.type==='bye') return `<tr style="background:#fffbe8"><td>${row.r+1}</td><td>${row.time}</td><td>${row.session}</td><td>—</td><td colspan="3" style="color:#b87c00;text-align:center">🟡 Exempt (+2 pts)</td></tr>`;
-    const done=row.myS!==''&&row.oppS!=='';
-    let result='',bg='#fff',rc='#666';
-    if(done){ const ms=+row.myS,os=+row.oppS;
-      if(ms>os){result='✅ V';bg='#f0fff5';rc='#1e8c45';wins++;pts+=3;}
-      else if(ms<os){result='❌ D';bg='#fff5f5';rc='#c0281a';losses++;}
-      else{result='🟡 N';bg='#fffbe8';rc='#b87c00';draws++;pts+=2;}
-    }
-    const sc=done?`<strong>${row.myS}–${row.oppS}</strong>`:'_–_';
-    return `<tr style="background:${bg}"><td>${row.r+1}</td><td>${row.time}</td><td>${row.session}</td><td style="color:#7040b0">${row.court}</td><td><strong>${tName(row.opp)}</strong><br><span style="color:#888;font-size:10px">${tClub(row.opp)}</span></td><td style="text-align:center">${sc}</td><td style="color:${done?rc:'#999'}">${done?result:'—'}</td></tr>`;
-  });
-  const st=computeStandings();
-  const rank=st.findIndex(s=>s.id===tid)+1;
-  return `<div class="fiche">
-    <div class="fiche-hdr"><strong>${team.name}</strong> · ${team.club} · ${team.p1} &amp; ${team.p2}${rank>0?` · <em>${rank}${rank===1?'er':'e'}/${st.length}</em>`:''}</div>
-    <table><thead><tr><th>#</th><th>Heure</th><th>Session</th><th>Terrain</th><th>Adversaire</th><th>Score</th><th>Résultat</th></tr></thead>
-    <tbody>${tableRows.join('')}</tbody></table>
-    <div class="fiche-bilan">Bilan : <strong>${pts} pts</strong> · ${wins}V ${draws}N ${losses}D</div>
-  </div>`;
-};
-
-// Toutes les fiches dans une seule fenêtre — plusieurs par page A4
-window.printAllTeamSchedules = function(){
-  if(!ST.schedule.length){ alert('Aucun planning généré.'); return; }
-  const fiches=ST.teams.slice(0,ST.cfg.n||ST.teams.length).map(t=>printTeamSchedule(t.id)).filter(Boolean);
-  const win=window.open('','_allfiches','width=1000,height=750');
-  win.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Fiches équipes</title>
-  <style>
-    *{box-sizing:border-box;margin:0;padding:0}
-    body{font-family:Arial,sans-serif;font-size:10px;background:#fff;color:#111}
-    .fiche{border:1px solid #bbb;border-radius:3px;padding:6px 8px;break-inside:avoid;margin-bottom:0}
-    .fiche-hdr{font-size:11px;font-weight:700;margin-bottom:4px;padding-bottom:3px;border-bottom:1.5px solid #1a2540;display:flex;justify-content:space-between}
-    .fiche-joueurs{font-size:9px;color:#555;margin-bottom:4px}
-    table{width:100%;border-collapse:collapse;font-size:9px}
-    th{background:#1a2540;color:#fff;padding:3px 5px;text-align:left;font-size:9px}
-    td{padding:3px 5px;border-bottom:1px solid #eee;vertical-align:middle}
-    .fiche-bilan{margin-top:4px;font-size:10px;font-weight:700;color:#1a2540;text-align:right}
-    .grid{display:grid;grid-template-columns:1fr 1fr;gap:6px;padding:6px}
-    @media print{
-      @page{size:A4 portrait;margin:5mm}
-      html{-webkit-print-color-adjust:exact;print-color-adjust:exact}
-      body{margin:0}
-      .noprint{display:none!important}
-      .fiche{break-inside:avoid;page-break-inside:avoid}
-      th{-webkit-print-color-adjust:exact;print-color-adjust:exact;background:#1a2540!important;color:#fff!important}
-      .grid{gap:5px;padding:0}
-    }
-  </style></head><body>
-  <div class="noprint" style="padding:8px 10px;background:#f0f4fa;border-bottom:1px solid #ccc;display:flex;align-items:center;gap:12px">
-    <strong>🏓 Fiches équipes — ${fiches.length} équipes</strong>
-    <button onclick="window.print()" style="padding:6px 18px;background:#1a7a3a;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px">🖨 Imprimer tout</button>
-    <span style="font-size:11px;color:#666">2 fiches par colonne · sans en-têtes/pieds de page (désactiver dans les options d'impression)</span>
-  </div>
-  <div class="grid">${fiches.join('')}</div>
-  </body></html>`);
-  win.document.close(); setTimeout(()=>win.print(),500);
-};
-
-// Version fiche individuelle (ouvre une fenêtre séparée)
-window.printTeamScheduleSingle = function(tid){
-  const html=printTeamSchedule(tid); if(!html) return;
-  const team=tObj(tid); if(!team) return;
-  const win=window.open('','_team_'+tid,'width=900,height=600');
-  win.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Fiche ${team.name}</title>
-  <style>
-    *{box-sizing:border-box;margin:0;padding:0}
-    body{font-family:Arial,sans-serif;font-size:12px;background:#fff;color:#111;padding:12px}
-    .fiche{border:none}
-    .fiche-hdr{font-size:15px;font-weight:700;margin-bottom:8px;padding-bottom:6px;border-bottom:2px solid #1a2540;display:flex;justify-content:space-between;align-items:flex-end}
-    .fiche-joueurs{font-size:11px;color:#444;margin-bottom:8px}
-    table{width:100%;border-collapse:collapse}
-    th{background:#1a2540;color:#fff;padding:5px 8px;text-align:left;font-size:11px}
-    td{padding:5px 8px;border-bottom:1px solid #eee;vertical-align:middle;font-size:11px}
-    .fiche-bilan{margin-top:8px;font-size:13px;font-weight:700;color:#1a2540;padding:6px 8px;background:#f0f4ff;border-radius:4px}
-    @media print{
-      @page{size:A4 portrait;margin:8mm}
-      /* Supprimer en-têtes et pieds de page navigateur */
-      @page{margin-top:5mm;margin-bottom:5mm}
-      html{-webkit-print-color-adjust:exact;print-color-adjust:exact}
-      .noprint{display:none!important}
-      body{padding:0;margin:0}
-      th{-webkit-print-color-adjust:exact;print-color-adjust:exact;background:#1a2540!important;color:#fff!important}
-    }
-  </style></head><body>
-  ${html}
-  <div class="noprint" style="margin-top:14px;display:flex;gap:8px">
-    <button onclick="window.print()" style="padding:7px 20px;background:#1a7a3a;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px">🖨 Imprimer</button>
-    <button onclick="window.close()" style="padding:7px 16px;background:#eee;border:none;border-radius:6px;cursor:pointer;font-size:13px">Fermer</button>
-  </div>
-  </body></html>`);
-  win.document.close(); setTimeout(()=>win.print(),400);
-};
-
-// ══════════════════════════════════════════════════════════
-// EXPORT CLASSEMENT PDF (via impression navigateur)
-// ══════════════════════════════════════════════════════════
-window.exportStandingsPDF = function(){
-  const st = computeStandings();
-  const roundInfo = ST.schedule.length>0 ? `Après ${ST.activeRound+1} tour${ST.activeRound>0?'s':''} / ${ST.schedule.length}` : '';
-  const rows = st.map((s,i)=>{
-    const gd=s.gf-s.ga;
-    const med=['🥇','🥈','🥉'];
-    const rkBg = i===0?'#d4a820':i===1?'#7090c0':i===2?'#a06030':'#888';
-    return `<tr style="background:${i%2===0?'#fff':'#f8f8f8'}">
-      <td style="padding:7px 10px;text-align:center;font-weight:700;color:${rkBg};font-size:${i<3?16:14}px">${med[i]||i+1}</td>
-      <td style="padding:7px 10px;font-weight:700">${s.name}</td>
-      <td style="padding:7px 10px;color:#666;font-size:11px">${s.club!=='—'?s.club:''}</td>
-      <td style="padding:7px 10px;font-size:11px;color:#555">${s.p1}<br>${s.p2}</td>
-      <td style="padding:7px 10px;text-align:center">${s.played}</td>
-      <td style="padding:7px 10px;text-align:center;color:#1e8c45;font-weight:700">${s.w}</td>
-      <td style="padding:7px 10px;text-align:center;color:#d4890a;font-weight:700">${s.d}</td>
-      <td style="padding:7px 10px;text-align:center;color:#c0281a;font-weight:700">${s.l}</td>
-      <td style="padding:7px 10px;text-align:center">${s.gf}</td>
-      <td style="padding:7px 10px;text-align:center">${s.ga}</td>
-      <td style="padding:7px 10px;text-align:center;color:${gd>=0?'#1e8c45':'#c0281a'};font-weight:700">${gd>0?'+':''}${gd}</td>
-      <td style="padding:7px 10px;text-align:center;font-size:18px;font-weight:900;color:#1e8c45">${s.pts}</td>
-    </tr>`;
-  }).join('');
-
-  const body = `
-    <div style="font-family:sans-serif;margin-bottom:16px">
-      <div style="font-size:22px;font-weight:700;color:#0d1a2e;margin-bottom:4px">🏓 Classement Interclub Pickleball</div>
-      <div style="font-size:13px;color:#555">${ST.teams.length} équipes inscrites &nbsp;·&nbsp; ${roundInfo} &nbsp;·&nbsp; Généré le ${new Date().toLocaleDateString('fr-FR')} à ${new Date().toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'})}</div>
+<!-- ══ MODALE ÉDITION ÉQUIPE ══ -->
+<div id="editTeamOverlay" style="display:none;position:fixed;inset:0;z-index:800;background:rgba(0,0,0,.6);backdrop-filter:blur(4px);align-items:center;justify-content:center;padding:16px">
+  <div style="background:var(--s1);border:1px solid var(--bdr2);border-radius:14px;padding:20px;width:100%;max-width:380px;box-shadow:0 8px 32px rgba(0,0,0,.4)">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+      <div style="font-family:'Oswald',sans-serif;font-size:16px;letter-spacing:.8px;color:var(--ink)">✏️ Modifier l'équipe</div>
+      <button onclick="closeEditTeam()" style="background:none;border:none;color:var(--muted);font-size:22px;cursor:pointer;padding:0 6px">✕</button>
     </div>
-    <table border="0" cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;font-family:sans-serif;font-size:13px;border:1px solid #ccc">
-      <thead><tr style="background:#0d1a2e;color:#fff">
-        <th style="padding:8px 10px">#</th>
-        <th style="padding:8px 10px;text-align:left">Équipe</th>
-        <th style="padding:8px 10px;text-align:left">Club</th>
-        <th style="padding:8px 10px;text-align:left">Joueurs</th>
-        <th style="padding:8px 10px">J</th>
-        <th style="padding:8px 10px;color:#5ad080">V</th>
-        <th style="padding:8px 10px;color:#ffd080">N</th>
-        <th style="padding:8px 10px;color:#ff8070">D</th>
-        <th style="padding:8px 10px">BP</th>
-        <th style="padding:8px 10px">BC</th>
-        <th style="padding:8px 10px">+/-</th>
-        <th style="padding:8px 10px;color:#5ad080">Pts</th>
-      </tr></thead>
-      <tbody>${rows}</tbody>
-    </table>
-    <div style="margin-top:10px;font-size:10px;color:#999;font-family:sans-serif">
-      V=Victoire (3pts) · N=Nul (2pts) · D=Défaite (0pt) · BP=Buts pour · BC=Buts contre · +/-=Goal average
-    </div>`;
-
-  const win=window.open('','_classement_pdf','width=1000,height=750');
-  win.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Classement Interclub</title>
-  <style>
-    body{margin:16px 20px;font-size:12px}
-    @page{size:A4 landscape;margin:10mm}
-    @media print{.noprint{display:none}body{margin:0}}
-    table{border-color:#ddd}
-  </style></head><body>${body}
-  <div class="noprint" style="margin-top:20px;display:flex;gap:10px">
-    <button onclick="window.print()" style="padding:8px 20px;background:#1e8c45;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px">🖨 Imprimer / Enregistrer en PDF</button>
-    <button onclick="window.close()" style="padding:8px 20px;background:#eee;border:none;border-radius:6px;cursor:pointer;font-size:13px">Fermer</button>
+    <input type="hidden" id="edit_team_id">
+    <div class="fg">
+      <div><label>Nom de l'équipe</label><input type="text" id="edit_t_name"></div>
+      <div><label>Club</label><input type="text" id="edit_t_club" placeholder="—"></div>
+      <div class="fr">
+        <div><label>Joueur 1</label><input type="text" id="edit_t_p1"></div>
+        <div><label>Joueur 2</label><input type="text" id="edit_t_p2"></div>
+      </div>
+      <div><label>Niveau</label>
+        <select id="edit_t_lv"><option value="1">⭐</option><option value="2">⭐⭐</option><option value="3">⭐⭐⭐</option><option value="4">⭐⭐⭐⭐</option><option value="5">⭐⭐⭐⭐⭐</option></select>
+      </div>
+    </div>
+    <div class="flex g8 fw" style="margin-top:14px">
+      <button class="btn btn-g" style="flex:1;justify-content:center" onclick="saveEditTeam()">✓ Enregistrer</button>
+      <button class="btn btn-ghost" onclick="closeEditTeam()">Annuler</button>
+    </div>
   </div>
-  </body></html>`);
-  win.document.close();
-  setTimeout(()=>win.print(),400);
-};
-
-// ══════════════════════════════════════════════════════════
-// BOUTONS SUPPLÉMENTAIRES SUR PAGE 4 ET 5
-// Injectés dynamiquement après chargement
-// ══════════════════════════════════════════════════════════
-document.addEventListener('DOMContentLoaded',()=>{
-  // Bouton mode mural dans le header admin du panneau
-  const extraBtns = document.createElement('div');
-  extraBtns.style.cssText='display:flex;gap:8px;flex-wrap:wrap;margin-top:10px';
-  extraBtns.setAttribute('data-role','admin');
-  extraBtns.innerHTML=`
-    <button class="btn btn-ghost btn-sm" onclick="openMural()" style="letter-spacing:.3px">📺 Mode mural (grand écran)</button>
-    <button class="btn btn-ghost btn-sm" onclick="exportStandingsPDF()" style="letter-spacing:.3px">📄 Exporter classement PDF</button>
-    <button class="btn btn-ghost btn-sm" onclick="printAllTeamSchedules()" style="letter-spacing:.3px">🖨 Fiches équipes (toutes)</button>`;
-  const adminPanel = document.querySelector('.admin-panel > div');
-  if(adminPanel) adminPanel.appendChild(extraBtns);
-
-  // Init config
-  if(typeof onCfgChange==='function') onCfgChange();
-});
-
-</script>
+</div>
 
 </body>
 </html>
